@@ -338,6 +338,7 @@ export async function switchAndOpenWorktree({
   repoPath,
   branch,
   create = false,
+  clobber = false,
   base = '',
   tool,
   prompt = '',
@@ -348,6 +349,7 @@ export async function switchAndOpenWorktree({
   // structured validation & worktree path even for CLI tools.
   const baseArgs = ['switch'];
   if (create) baseArgs.push('-c');
+  if (clobber) baseArgs.push('--clobber');
   baseArgs.push(branch);
   if (base) baseArgs.push('--base', base);
   baseArgs.push('--no-cd', '-y', '--format=json');

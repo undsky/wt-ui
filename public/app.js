@@ -561,8 +561,8 @@ function renderWorktrees() {
               : ''
           }
           ${
-            hasWorktree && !isMain
-              ? `<button class="btn btn-danger-ghost btn-sm btn-remove-wt">${escapeHtml(t('removeBtn'))}</button>`
+            !isMain && (hasWorktree || (!isDefault && item.branch))
+              ? `<button class="btn btn-danger-ghost btn-sm btn-remove-wt">${escapeHtml(hasWorktree ? t('removeBtn') : t('deleteBtn'))}</button>`
               : ''
           }
         </div>
@@ -570,7 +570,7 @@ function renderWorktrees() {
     `;
 
     tr.querySelector('.btn-open-wt').addEventListener('click', () => {
-      openWorktreeRow(branchName, !hasWorktree);
+      openWorktreeRow(branchName, false);
     });
 
     const mergeBtn = tr.querySelector('.btn-merge-wt');
@@ -686,26 +686,47 @@ async function deleteWorkspace(wsId) {
   await refreshWorktrees();
 }
 
+async function switchWorktreeWithClobberPrompt(payload) {
+  try {
+    return await api('/api/worktrees/switch', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    const stderr = err.payload?.stderr || err.message || '';
+    if (!payload.clobber && /directory already exists|--clobber/i.test(stderr)) {
+      appendLog(t('logFail', { target: err.payload?.command || payload.branch }), stderr);
+      if (window.confirm(t('clobberConfirm', { stderr }))) {
+        return api('/api/worktrees/switch', {
+          method: 'POST',
+          body: JSON.stringify({ ...payload, clobber: true }),
+        });
+      }
+      err.clobberCancelled = true;
+    }
+    throw err;
+  }
+}
+
 async function openWorktreeRow(branch, shouldCreate) {
   const active = getActiveProject();
   if (!active) return;
   const toolId = $('select-tool').value || 'claude';
   try {
-    const res = await api('/api/worktrees/switch', {
-      method: 'POST',
-      body: JSON.stringify({
-        projectId: active.id,
-        branch,
-        create: shouldCreate,
-        toolId,
-      }),
+    const res = await switchWorktreeWithClobberPrompt({
+      projectId: active.id,
+      branch,
+      create: shouldCreate,
+      toolId,
     });
     appendLog(t('logExec', { cmd: res.command }), res.stdout || res.stderr || t('openedFallback'));
     showToast(t('openedWorktreeToast', { branch }), 'success');
     await refreshWorktrees();
   } catch (err) {
-    appendLog(t('logFail', { target: err.payload?.command || branch }), err.payload?.stderr || err.message);
-    showToast(err.message, 'error');
+    if (!err.clobberCancelled) {
+      appendLog(t('logFail', { target: err.payload?.command || branch }), err.payload?.stderr || err.message);
+    }
+    showToast(err.payload?.stderr || err.message, 'error');
   }
 }
 
@@ -868,6 +889,12 @@ async function removeWorktreeRow(branch) {
       method: 'POST',
       body: JSON.stringify({ projectId: active.id, branch }),
     });
+    const outcome = Array.isArray(res.data) ? res.data[0]?.branch_outcome : res.data?.branch_outcome;
+    if (outcome === 'retained_unmerged' || outcome === 'retained_failed') {
+      const err = new Error(res.stderr || outcome);
+      err.payload = { command: res.command, stderr: res.stderr || outcome };
+      throw err;
+    }
     appendLog(t('removeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
     showToast(t('removedToast', { branch }), 'success');
     await refreshWorktrees();
@@ -1123,15 +1150,12 @@ function bindEvents() {
     const btn = $('btn-switch-submit');
     btn.disabled = true;
     try {
-      const res = await api('/api/worktrees/switch', {
-        method: 'POST',
-        body: JSON.stringify({
-          projectId: active.id,
-          branch: $('input-branch').value.trim(),
-          create: $('input-create').checked,
-          base: $('input-base').value.trim(),
-          toolId: $('select-tool').value,
-        }),
+      const res = await switchWorktreeWithClobberPrompt({
+        projectId: active.id,
+        branch: $('input-branch').value.trim(),
+        create: $('input-create').checked,
+        base: $('input-base').value.trim(),
+        toolId: $('select-tool').value,
       });
       appendLog(t('logExec', { cmd: res.command }), res.stdout || res.stderr || t('worktreePathLog', { path: res.worktreePath }));
       showToast(t('worktreeReadyToast'), 'success');
@@ -1139,7 +1163,9 @@ function bindEvents() {
       updateCommandPreview();
       await refreshWorktrees();
     } catch (err) {
-      appendLog(t('logFail', { target: err.payload?.command || '' }), err.payload?.stderr || err.message);
+      if (!err.clobberCancelled) {
+        appendLog(t('logFail', { target: err.payload?.command || '' }), err.payload?.stderr || err.message);
+      }
       showToast(err.payload?.stderr || err.message, 'error');
     } finally {
       btn.disabled = false;

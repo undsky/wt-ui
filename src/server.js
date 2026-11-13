@@ -306,6 +306,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           repoPath: project.path,
           branch: String(body.branch).trim(),
           create: Boolean(body.create),
+          clobber: Boolean(body.clobber),
           base: body.base ? String(body.base).trim() : '',
           tool,
           prompt: body.prompt ? String(body.prompt).trim() : '',
