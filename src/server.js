@@ -9,6 +9,22 @@ import { checkEnvironment, invalidateEnvironmentCache, parseWtJson, runWt } from
 import { autoInstallWorktrunk } from './wt-installer.js';
 import { browsePath, inspectGitRepo, parseCodeWorkspace, pickNativePath } from './workspace.js';
 import {
+  deleteRemoteBranch,
+  detectOrStartLocalConflictSession,
+  listGitWorktrees,
+  listRemoteBranches,
+  mergeRemoteBranch,
+  pullWorktreeBranch,
+  pushWorktreeBranch,
+} from './remote.js';
+import {
+  abortConflictMerge,
+  completeConflictMerge,
+  getConflictStatus,
+  readConflictFileDetails,
+  resolveConflictFile,
+} from './conflict.js';
+import {
   addStandaloneProject,
   importWorkspaceProjects,
   loadStore,
@@ -431,12 +447,39 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
 
         const result = await runWt(env.wtBin, project.path, args, { timeout: 120_000 });
         const parsed = parseWtJson(result.stdout);
-        sendJson(res, result.ok ? 200 : 422, {
-          ok: result.ok,
-          command: result.command,
+        let conflictInfo = { hasConflicts: false, conflictSession: null };
+        let finalOk = result.ok;
+        let finalCmd = result.command;
+        let finalStdout = result.stdout;
+        let finalStderr = result.stderr;
+
+        if (!result.ok) {
+          conflictInfo = await detectOrStartLocalConflictSession(project.path, {
+            sourceBranch: String(body.branch).trim(),
+            targetBranch: body.target ? String(body.target).trim() : '',
+            noFf: Boolean(body.noFf),
+            noSquash: Boolean(body.noSquash),
+            wtOutput: `${result.stdout || ''}\n${result.stderr || ''}`,
+          });
+          if (conflictInfo.conflictSession) {
+            conflictInfo.conflictSession.autoPush = Boolean(body.autoPush);
+          }
+        } else if (body.autoPush) {
+          const pushRes = await pushWorktreeBranch(project.path, {
+            branch: body.target ? String(body.target).trim() : '',
+          });
+          finalOk = pushRes.ok;
+          finalCmd = `${result.command} && ${pushRes.command}`;
+          finalStdout = [result.stdout, pushRes.stdout].filter(Boolean).join('\n');
+          finalStderr = [result.stderr, pushRes.stderr].filter(Boolean).join('\n');
+        }
+        sendJson(res, finalOk ? 200 : 422, {
+          ok: finalOk,
+          command: finalCmd,
           data: parsed,
-          stdout: result.stdout,
-          stderr: result.stderr,
+          stdout: finalStdout,
+          stderr: finalStderr,
+          ...conflictInfo,
         });
         return;
       }
@@ -476,6 +519,207 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         return;
       }
 
+      if (req.method === 'POST' && pathname === '/api/worktrees/pull') {
+        const body = await readJsonBody(req);
+        const store = loadStore();
+        const project = store.projects.find((p) => p.id === (body.projectId || store.activeProjectId));
+        if (!project) {
+          sendJson(res, 404, { error: '项目不存在' });
+          return;
+        }
+        const workDir = await resolveProjectWorkDir(project, body.workDir || '');
+        const result = await pullWorktreeBranch(project.path, {
+          workDir,
+          branch: body.branch ? String(body.branch).trim() : '',
+        });
+        sendJson(res, result.ok ? 200 : 422, result);
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/worktrees/push') {
+        const body = await readJsonBody(req);
+        const store = loadStore();
+        const project = store.projects.find((p) => p.id === (body.projectId || store.activeProjectId));
+        if (!project) {
+          sendJson(res, 404, { error: '项目不存在' });
+          return;
+        }
+        const workDir = await resolveProjectWorkDir(project, body.workDir || '');
+        const result = await pushWorktreeBranch(project.path, {
+          workDir,
+          branch: body.branch ? String(body.branch).trim() : '',
+        });
+        sendJson(res, result.ok ? 200 : 422, result);
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/remote/branches') {
+        const projectId = url.searchParams.get('projectId');
+        const fetchRemote = url.searchParams.get('fetch') === '1';
+        const targetBranch = url.searchParams.get('target') || '';
+
+        const store = loadStore();
+        const project = store.projects.find((p) => p.id === (projectId || store.activeProjectId));
+        if (!project) {
+          sendJson(res, 404, { error: '未选择项目' });
+          return;
+        }
+
+        const data = await listRemoteBranches(project.path, {
+          fetch: fetchRemote,
+          targetBranch,
+        });
+        sendJson(res, 200, {
+          ok: true,
+          project,
+          data,
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/remote/merge') {
+        const body = await readJsonBody(req);
+        const store = loadStore();
+        const project = store.projects.find((p) => p.id === (body.projectId || store.activeProjectId));
+        if (!project) {
+          sendJson(res, 404, { error: '项目不存在' });
+          return;
+        }
+        if (!body.branch || !String(body.branch).trim()) {
+          sendJson(res, 400, { error: '请指定要合并的远程分支' });
+          return;
+        }
+
+        const result = await mergeRemoteBranch(project.path, {
+          remoteBranch: String(body.branch).trim(),
+          targetBranch: body.target ? String(body.target).trim() : '',
+          squash: Boolean(body.squash),
+          noFf: Boolean(body.noFf),
+          autoPush: body.autoPush !== false,
+          deleteRemote: Boolean(body.deleteRemote),
+        });
+
+        sendJson(res, result.ok ? 200 : 422, result);
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/remote/delete') {
+        const body = await readJsonBody(req);
+        const store = loadStore();
+        const project = store.projects.find((p) => p.id === (body.projectId || store.activeProjectId));
+        if (!project) {
+          sendJson(res, 404, { error: '项目不存在' });
+          return;
+        }
+        if (!body.branch || !String(body.branch).trim()) {
+          sendJson(res, 400, { error: '请指定要删除的远程分支' });
+          return;
+        }
+
+        const result = await deleteRemoteBranch(project.path, String(body.branch).trim());
+        sendJson(res, result.ok ? 200 : 422, result);
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/conflicts/status') {
+        const projectId = url.searchParams.get('projectId');
+        const requestedWorkDir = url.searchParams.get('workDir') || '';
+        const trackedRaw = url.searchParams.get('tracked') || '';
+        const trackedFiles = trackedRaw ? trackedRaw.split('|').filter(Boolean) : [];
+
+        const store = loadStore();
+        const project = store.projects.find((p) => p.id === (projectId || store.activeProjectId));
+        if (!project) {
+          sendJson(res, 404, { error: '未选择项目' });
+          return;
+        }
+        const workDir = await resolveProjectWorkDir(project, requestedWorkDir);
+        const status = await getConflictStatus(workDir, trackedFiles);
+        sendJson(res, 200, { ok: true, status });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/conflicts/file') {
+        const projectId = url.searchParams.get('projectId');
+        const requestedWorkDir = url.searchParams.get('workDir') || '';
+        const filePath = url.searchParams.get('file') || '';
+
+        const store = loadStore();
+        const project = store.projects.find((p) => p.id === (projectId || store.activeProjectId));
+        if (!project) {
+          sendJson(res, 404, { error: '未选择项目' });
+          return;
+        }
+        if (!filePath) {
+          sendJson(res, 400, { error: '请提供冲突文件路径' });
+          return;
+        }
+        const workDir = await resolveProjectWorkDir(project, requestedWorkDir);
+        const file = await readConflictFileDetails(workDir, filePath);
+        sendJson(res, 200, { ok: true, file });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/conflicts/resolve') {
+        const body = await readJsonBody(req);
+        const store = loadStore();
+        const project = store.projects.find((p) => p.id === (body.projectId || store.activeProjectId));
+        if (!project) {
+          sendJson(res, 404, { error: '项目不存在' });
+          return;
+        }
+        if (!body.filePath) {
+          sendJson(res, 400, { error: '请提供冲突文件路径' });
+          return;
+        }
+        const workDir = await resolveProjectWorkDir(project, body.workDir);
+        const result = await resolveConflictFile(workDir, {
+          filePath: body.filePath,
+          content: body.content,
+          strategy: body.strategy,
+          hunkIndex: body.hunkIndex,
+          hunkChoice: body.hunkChoice,
+          stage: body.stage,
+          trackedFiles: Array.isArray(body.trackedFiles) ? body.trackedFiles : [],
+        });
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/conflicts/complete') {
+        const body = await readJsonBody(req);
+        const store = loadStore();
+        const project = store.projects.find((p) => p.id === (body.projectId || store.activeProjectId));
+        if (!project) {
+          sendJson(res, 404, { error: '项目不存在' });
+          return;
+        }
+        const workDir = await resolveProjectWorkDir(project, body.workDir);
+        const result = await completeConflictMerge(workDir, {
+          sourceBranch: body.sourceBranch,
+          targetBranch: body.targetBranch,
+          isRemote: Boolean(body.isRemote),
+          autoPush: body.autoPush !== false,
+          deleteRemote: Boolean(body.deleteRemote),
+        });
+        sendJson(res, result.ok ? 200 : 422, result);
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/conflicts/abort') {
+        const body = await readJsonBody(req);
+        const store = loadStore();
+        const project = store.projects.find((p) => p.id === (body.projectId || store.activeProjectId));
+        if (!project) {
+          sendJson(res, 404, { error: '项目不存在' });
+          return;
+        }
+        const workDir = await resolveProjectWorkDir(project, body.workDir);
+        const result = await abortConflictMerge(workDir);
+        sendJson(res, result.ok ? 200 : 422, result);
+        return;
+      }
+
       sendJson(res, 404, { error: `Unknown API route: ${req.method} ${pathname}` });
     } catch (err) {
       sendJson(res, err instanceof HttpError ? err.status : 500, { error: err?.message || String(err) });
@@ -483,5 +727,19 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
   });
 
   return server;
+}
+
+async function resolveProjectWorkDir(project, requestedWorkDir) {
+  const projRoot = resolve(project.path);
+  if (!requestedWorkDir) return projRoot;
+  const candidate = resolve(requestedWorkDir);
+  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  if (norm(candidate) === norm(projRoot)) return candidate;
+
+  const worktrees = await listGitWorktrees(projRoot);
+  const matched = worktrees.find((wt) => norm(resolve(wt.path)) === norm(candidate));
+  if (matched) return resolve(matched.path);
+
+  throw new HttpError(403, `目标工作树目录不属于当前项目: ${requestedWorkDir}`);
 }
 

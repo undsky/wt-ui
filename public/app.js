@@ -9,12 +9,17 @@ const state = {
   tools: [],
   openTabIds: [],
   worktreeCache: {},
+  remoteCache: {},
   activeProjectId: null,
   worktreeData: null,
+  remoteData: null,
+  branchMode: 'local',
   browseCurrentPath: '',
   browseParentPath: null,
   mergeTargetBranch: null,
   mergeAllMode: false,
+  mergeIsRemote: false,
+  conflictSession: null,
 };
 
 function loadOpenTabs() {
@@ -468,7 +473,78 @@ function renderMainProject() {
   renderToolSelects();
 }
 
+function applyBranchModeUI() {
+  const isRemote = state.branchMode === 'remote';
+  const localBtn = $('btn-mode-local');
+  const remoteBtn = $('btn-mode-remote');
+  if (localBtn) {
+    localBtn.classList.toggle('active', !isRemote);
+    localBtn.setAttribute('aria-selected', !isRemote ? 'true' : 'false');
+  }
+  if (remoteBtn) {
+    remoteBtn.classList.toggle('active', isRemote);
+    remoteBtn.setAttribute('aria-selected', isRemote ? 'true' : 'false');
+  }
+
+  const titleEl = $('list-card-title');
+  if (titleEl) {
+    titleEl.dataset.i18n = isRemote ? 'remoteListTitle' : 'worktreeListTitle';
+    titleEl.textContent = t(isRemote ? 'remoteListTitle' : 'worktreeListTitle');
+  }
+
+  $('local-branches-toggle-wrap')?.classList.toggle('hidden', isRemote);
+  $('remote-hide-merged-wrap')?.classList.toggle('hidden', !isRemote);
+  $('btn-fetch-remote')?.classList.toggle('hidden', !isRemote);
+
+  const thBranch = $('th-branch');
+  if (thBranch) {
+    thBranch.dataset.i18n = isRemote ? 'colRemoteBranchStatus' : 'colBranchStatus';
+    thBranch.textContent = t(isRemote ? 'colRemoteBranchStatus' : 'colBranchStatus');
+  }
+  const thDiff = $('th-diff');
+  if (thDiff) {
+    thDiff.dataset.i18n = isRemote ? 'colDiffTarget' : 'colDiffDefault';
+    thDiff.textContent = t(isRemote ? 'colDiffTarget' : 'colDiffDefault');
+  }
+  const thPath = $('th-path');
+  if (thPath) {
+    thPath.dataset.i18n = isRemote ? 'colRemoteMeta' : 'colWorktreePath';
+    thPath.textContent = t(isRemote ? 'colRemoteMeta' : 'colWorktreePath');
+  }
+}
+
+async function setBranchMode(mode) {
+  const next = mode === 'remote' ? 'remote' : 'local';
+  const changed = state.branchMode !== next;
+  state.branchMode = next;
+  applyBranchModeUI();
+
+  if (next === 'remote') {
+    const active = getActiveProject();
+    if (active && state.remoteCache[active.id]) {
+      state.remoteData = state.remoteCache[active.id];
+      renderWorktrees();
+    } else {
+      renderWorktrees();
+    }
+    if (changed) {
+      await refreshRemoteBranches(!state.remoteCache[active?.id]);
+    }
+  } else {
+    renderWorktrees();
+    if (changed) {
+      await refreshWorktrees();
+    }
+  }
+}
+
 function renderWorktrees() {
+  applyBranchModeUI();
+  if (state.branchMode === 'remote') {
+    renderRemoteBranches();
+    return;
+  }
+
   const tbody = $('worktree-tbody');
   tbody.innerHTML = '';
 
@@ -495,11 +571,12 @@ function renderWorktrees() {
     const wt = item.worktree;
     const hasWorktree = Boolean(wt);
     const isMain = Boolean(wt?.main);
+    const isDefault = Boolean(item.branch && item.branch === defaultBranch);
     const gutter = wt?.current ? '@' : wt?.main ? '^' : wt ? '+' : '/';
 
     // Status pills
     const pills = [];
-    if (item.branch && item.branch === defaultBranch) pills.push(`<span class="badge badge-success">${escapeHtml(t('defaultBranchTag'))}</span>`);
+    if (isDefault) pills.push(`<span class="badge badge-success">${escapeHtml(t('defaultBranchTag'))}</span>`);
     if (isMain) pills.push(`<span class="badge badge-info">${escapeHtml(t('mainWorktreeTag'))}</span>`);
     if (!hasWorktree) pills.push(`<span class="badge badge-neutral">${escapeHtml(t('noWorktreeTag'))}</span>`);
     if (wt?.changes?.conflicted) pills.push(`<span class="badge badge-danger">${escapeHtml(t('conflictTag'))}</span>`);
@@ -524,7 +601,7 @@ function renderWorktrees() {
       if (db.merge_conflicts) {
         divParts.push(`<span class="badge badge-danger">${escapeHtml(t('mergeConflictRisk'))}</span>`);
       }
-    } else if (isMain || item.branch === defaultBranch) {
+    } else if (isMain || isDefault) {
       divParts.push(`<span class="muted">${escapeHtml(t('baseBranchTag'))}</span>`);
     }
 
@@ -538,6 +615,9 @@ function renderWorktrees() {
 
     const selectedTool = getToolById($('select-tool').value || 'claude');
     const openLabel = hasWorktree ? t('openWithTool', { tool: selectedTool?.name || t('toolFallback') }) : t('createAndOpen');
+    const remoteAhead = item.remote?.ahead || 0;
+    const pushLabel = remoteAhead > 0 ? t('pushBtnAhead', { ahead: remoteAhead }) : t('pushBtn');
+    const pushBtnCls = remoteAhead > 0 ? 'btn-primary' : 'btn-secondary';
 
     tr.innerHTML = `
       <td>
@@ -554,6 +634,17 @@ function renderWorktrees() {
       <td>${pathHtml}</td>
       <td class="col-actions">
         <div class="actions-cell">
+          ${
+            wt?.changes?.conflicted && wt?.path
+              ? `<button class="btn btn-primary btn-sm btn-resolve-conflict">${escapeHtml(t('resolveConflictBtn'))}</button>`
+              : ''
+          }
+          ${
+            hasWorktree && wt?.path
+              ? `<button class="btn btn-secondary btn-sm btn-pull-wt">${escapeHtml(t('pullBtn'))}</button>
+                 <button class="btn ${pushBtnCls} btn-sm btn-push-wt">${escapeHtml(pushLabel)}</button>`
+              : ''
+          }
           <button class="btn btn-secondary btn-sm btn-open-wt">${escapeHtml(openLabel)}</button>
           ${
             hasWorktree && !isMain && item.branch
@@ -569,6 +660,21 @@ function renderWorktrees() {
       </td>
     `;
 
+    const resolveBtn = tr.querySelector('.btn-resolve-conflict');
+    if (resolveBtn) {
+      resolveBtn.addEventListener('click', () => openExistingWorktreeConflictModal(wt.path, branchName));
+    }
+
+    const pullBtn = tr.querySelector('.btn-pull-wt');
+    if (pullBtn) {
+      pullBtn.addEventListener('click', () => pullWorktreeRow(wt.path, item.branch || branchName, pullBtn));
+    }
+
+    const pushBtn = tr.querySelector('.btn-push-wt');
+    if (pushBtn) {
+      pushBtn.addEventListener('click', () => pushWorktreeRow(wt.path, item.branch || branchName, pushBtn));
+    }
+
     tr.querySelector('.btn-open-wt').addEventListener('click', () => {
       openWorktreeRow(branchName, false);
     });
@@ -581,6 +687,118 @@ function renderWorktrees() {
     const removeBtn = tr.querySelector('.btn-remove-wt');
     if (removeBtn) {
       removeBtn.addEventListener('click', () => removeWorktreeRow(item.branch || wt.path));
+    }
+
+    tbody.appendChild(tr);
+  }
+}
+
+function renderRemoteBranches() {
+  const tbody = $('worktree-tbody');
+  tbody.innerHTML = '';
+
+  const allItems = state.remoteData?.items || [];
+  const hideMerged = $('toggle-hide-merged-remote')?.checked;
+  const items = hideMerged ? allItems.filter((item) => !item.merged || item.isDefault || item.isTarget) : allItems;
+
+  $('wt-count').textContent = String(items.length);
+  const mergeAllBtn = $('btn-merge-all');
+  if (mergeAllBtn) {
+    mergeAllBtn.classList.toggle('hidden', getMergeableRemoteBranches().length === 0);
+  }
+
+  if (items.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">${escapeHtml(t('noRemoteData'))}</td></tr>`;
+    return;
+  }
+
+  const selectedTool = getToolById($('select-tool').value || 'claude');
+
+  for (const item of items) {
+    const tr = document.createElement('tr');
+    const pills = [];
+    if (item.isDefault) {
+      pills.push(`<span class="badge badge-success">${escapeHtml(t('defaultBranchTag'))}</span>`);
+    }
+    if (item.ahead > 0) {
+      pills.push(`<span class="badge badge-warn">${escapeHtml(t('remoteAheadBadge', { ahead: item.ahead }))}</span>`);
+    } else if (item.merged) {
+      pills.push(`<span class="badge badge-success">${escapeHtml(t('remoteMergedBadge'))}</span>`);
+    }
+    if (item.worktreePath) {
+      pills.push(`<span class="badge badge-info">${escapeHtml(t('localWorktreeExistsBadge'))}</span>`);
+    } else if (item.hasLocalBranch) {
+      pills.push(`<span class="badge badge-neutral">${escapeHtml(t('localBranchExistsBadge'))}</span>`);
+    }
+
+    const divParts = [];
+    if (item.isDefault || item.isTarget) {
+      divParts.push(`<span class="muted">${escapeHtml(t('baseBranchTag'))}</span>`);
+    } else {
+      if (item.ahead || item.behind) {
+        divParts.push(`<span>↑${item.ahead ?? 0} ↓${item.behind ?? 0}</span>`);
+      }
+      if (item.diff && (item.diff.added || item.diff.deleted)) {
+        divParts.push(`<span class="mono">+${item.diff.added} -${item.diff.deleted}</span>`);
+      }
+    }
+
+    const commitHtml = item.head?.short_sha
+      ? `<div><span class="mono">${escapeHtml(item.head.short_sha)}</span> ${escapeHtml(item.head.subject || '')}</div>`
+      : '<span class="muted">-</span>';
+
+    const metaParts = [`<span class="badge badge-neutral">${escapeHtml(item.remote)}</span>`];
+    if (item.head?.author) {
+      metaParts.push(`<span class="muted">${escapeHtml(item.head.author)}</span>`);
+    }
+
+    const openLabel = item.worktreePath
+      ? t('openWithTool', { tool: selectedTool?.name || t('toolFallback') })
+      : t('checkoutWorktreeBtn');
+
+    tr.innerHTML = `
+      <td>
+        <div class="branch-cell">
+          <div class="branch-main">
+            <span class="gutter-symbol">☁</span>
+            <strong>${escapeHtml(item.fullRef)}</strong>
+          </div>
+          <div class="status-pills">${pills.join('')}</div>
+        </div>
+      </td>
+      <td><div class="status-pills">${divParts.join(' ') || `<span class="muted">${escapeHtml(t('noDiff'))}</span>`}</div></td>
+      <td>${commitHtml}</td>
+      <td><div class="status-pills">${metaParts.join(' ')}</div></td>
+      <td class="col-actions">
+        <div class="actions-cell">
+          ${
+            !item.isDefault
+              ? `<button class="btn btn-success btn-sm btn-merge-remote">${escapeHtml(t('oneClickMerge'))}</button>`
+              : ''
+          }
+          <button class="btn btn-secondary btn-sm btn-checkout-remote">${escapeHtml(openLabel)}</button>
+          ${
+            !item.isDefault
+              ? `<button class="btn btn-danger-ghost btn-sm btn-delete-remote">${escapeHtml(t('deleteBtn'))}</button>`
+              : ''
+          }
+        </div>
+      </td>
+    `;
+
+    const mergeBtn = tr.querySelector('.btn-merge-remote');
+    if (mergeBtn) {
+      mergeBtn.addEventListener('click', () => openRemoteMergeModal(item.fullRef));
+    }
+
+    tr.querySelector('.btn-checkout-remote').addEventListener('click', () => {
+      const shouldCreate = !item.hasLocalBranch && !item.worktreePath;
+      openWorktreeRow(item.branch, shouldCreate, shouldCreate ? item.fullRef : '');
+    });
+
+    const delBtn = tr.querySelector('.btn-delete-remote');
+    if (delBtn) {
+      delBtn.addEventListener('click', () => deleteRemoteBranchRow(item.fullRef));
     }
 
     tbody.appendChild(tr);
@@ -636,6 +854,53 @@ async function refreshWorktrees() {
   }
 }
 
+async function refreshRemoteBranches(fetchRemote = false) {
+  const active = getActiveProject();
+  if (!active || !state.openTabIds.includes(active.id)) return;
+  const fetchBtn = $('btn-fetch-remote');
+  if (fetchRemote && fetchBtn) {
+    fetchBtn.disabled = true;
+    fetchBtn.textContent = t('fetchingRemoteBtn');
+  }
+  try {
+    const fetchParam = fetchRemote ? '&fetch=1' : '';
+    const res = await api(`/api/remote/branches?projectId=${encodeURIComponent(active.id)}${fetchParam}`);
+    state.remoteCache[active.id] = res.data;
+    if (state.activeProjectId === active.id) {
+      state.remoteData = res.data;
+      renderWorktrees();
+    }
+    if (fetchRemote && res.data?.fetchCommand) {
+      const out = [res.data.fetchStdout, res.data.fetchStderr].filter(Boolean).join('\n');
+      if (res.data.fetchOk) {
+        appendLog(t('fetchRemoteSuccessLog', { cmd: res.data.fetchCommand }), out);
+        showToast(t('fetchRemoteSuccessToast'), 'success');
+      } else {
+        appendLog(t('fetchRemoteWarnLog', { cmd: res.data.fetchCommand }), out);
+      }
+    }
+  } catch (err) {
+    if (state.activeProjectId === active.id) {
+      state.remoteData = null;
+      renderWorktrees();
+    }
+    appendLog(t('fetchRemoteFail'), err.payload?.stderr || err.message);
+  } finally {
+    if (fetchBtn) {
+      fetchBtn.disabled = false;
+      fetchBtn.textContent = t('fetchRemoteBtn');
+    }
+  }
+}
+
+async function refreshCurrentList() {
+  if (state.branchMode === 'remote') {
+    await refreshRemoteBranches(false);
+  } else {
+    await refreshWorktrees();
+  }
+}
+
 async function selectProject(projectId) {
   if (!state.openTabIds.includes(projectId)) {
     state.openTabIds.push(projectId);
@@ -643,16 +908,18 @@ async function selectProject(projectId) {
   }
   state.activeProjectId = projectId;
   state.worktreeData = state.worktreeCache[projectId] || null;
+  state.remoteData = state.remoteCache[projectId] || null;
   renderSidebar();
   renderMainProject();
-  if (state.worktreeData) {
-    renderWorktrees();
-  }
+  renderWorktrees();
   await api('/api/active-project', {
     method: 'POST',
     body: JSON.stringify({ projectId }),
   });
   await refreshWorktrees();
+  if (state.branchMode === 'remote') {
+    await refreshRemoteBranches(!state.remoteCache[projectId]);
+  }
 }
 
 async function closeTab(projectId) {
@@ -669,6 +936,7 @@ async function closeTab(projectId) {
     }
     state.activeProjectId = null;
     state.worktreeData = null;
+    state.remoteData = null;
   }
   renderSidebar();
   renderMainProject();
@@ -677,13 +945,13 @@ async function closeTab(projectId) {
 async function deleteProject(projectId) {
   await api(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
   await loadState();
-  await refreshWorktrees();
+  await refreshCurrentList();
 }
 
 async function deleteWorkspace(wsId) {
   await api(`/api/workspaces/${encodeURIComponent(wsId)}`, { method: 'DELETE' });
   await loadState();
-  await refreshWorktrees();
+  await refreshCurrentList();
 }
 
 async function switchWorktreeWithClobberPrompt(payload) {
@@ -708,7 +976,7 @@ async function switchWorktreeWithClobberPrompt(payload) {
   }
 }
 
-async function openWorktreeRow(branch, shouldCreate) {
+async function openWorktreeRow(branch, shouldCreate, base = '') {
   const active = getActiveProject();
   if (!active) return;
   const toolId = $('select-tool').value || 'claude';
@@ -717,11 +985,15 @@ async function openWorktreeRow(branch, shouldCreate) {
       projectId: active.id,
       branch,
       create: shouldCreate,
+      base,
       toolId,
     });
     appendLog(t('logExec', { cmd: res.command }), res.stdout || res.stderr || t('openedFallback'));
     showToast(t('openedWorktreeToast', { branch }), 'success');
-    await refreshWorktrees();
+    await Promise.all([
+      refreshWorktrees(),
+      state.branchMode === 'remote' ? refreshRemoteBranches(false) : Promise.resolve(),
+    ]);
   } catch (err) {
     if (!err.clobberCancelled) {
       appendLog(t('logFail', { target: err.payload?.command || branch }), err.payload?.stderr || err.message);
@@ -730,21 +1002,105 @@ async function openWorktreeRow(branch, shouldCreate) {
   }
 }
 
+async function pullWorktreeRow(workDir, branch, btnEl) {
+  const active = getActiveProject();
+  if (!active || !workDir) return;
+  const origLabel = btnEl ? btnEl.textContent : '';
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = t('pullingBtn');
+  }
+  try {
+    const res = await api('/api/worktrees/pull', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: active.id,
+        workDir,
+        branch,
+      }),
+    });
+    const out = [res.stdout, res.stderr].filter(Boolean).join('\n');
+    appendLog(t('pullSuccessLog', { cmd: res.command }), out);
+    showToast(t('pullSuccessToast', { branch }), 'success');
+    await Promise.all([
+      refreshWorktrees(),
+      state.remoteCache[active.id] ? refreshRemoteBranches(false) : Promise.resolve(),
+    ]);
+  } catch (err) {
+    const out = [err.payload?.stdout, err.payload?.stderr].filter(Boolean).join('\n') || err.message;
+    appendLog(t('pullFailLog', { cmd: err.payload?.command || '' }), out);
+    if (err.payload?.hasConflicts && err.payload?.conflictSession) {
+      showToast(t('conflictDetectedToast'), 'info');
+      await openConflictModal(err.payload.conflictSession);
+      await refreshWorktrees();
+    } else {
+      showToast(t('pullFailToast', { msg: err.payload?.stderr || err.message }), 'error');
+    }
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = origLabel || t('pullBtn');
+    }
+  }
+}
+
+async function pushWorktreeRow(workDir, branch, btnEl) {
+  const active = getActiveProject();
+  if (!active || !workDir) return;
+  const origLabel = btnEl ? btnEl.textContent : '';
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = t('pushingBtn');
+  }
+  try {
+    const res = await api('/api/worktrees/push', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: active.id,
+        workDir,
+        branch,
+      }),
+    });
+    const out = [res.stdout, res.stderr].filter(Boolean).join('\n');
+    appendLog(t('pushSuccessLog', { cmd: res.command }), out);
+    showToast(t('pushSuccessToast', { branch }), 'success');
+    await Promise.all([
+      refreshWorktrees(),
+      state.remoteCache[active.id] ? refreshRemoteBranches(false) : Promise.resolve(),
+    ]);
+  } catch (err) {
+    const out = [err.payload?.stdout, err.payload?.stderr].filter(Boolean).join('\n') || err.message;
+    appendLog(t('pushFailLog', { cmd: err.payload?.command || '' }), out);
+    showToast(t('pushFailToast', { msg: err.payload?.stderr || err.message }), 'error');
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = origLabel || t('pushBtn');
+    }
+  }
+}
+
 function populateMergeTargetSelect(sourceBranch) {
   const selectEl = $('merge-target');
   if (!selectEl) return;
 
   const items = state.worktreeData?.items || [];
-  const defaultBranch = state.worktreeData?.repo?.default_branch || 'main';
-  const mainBranch = getMainWorktreeBranch(state.worktreeData);
+  const remoteLocalBranches = state.remoteData?.localBranches || [];
+  const defaultBranch =
+    state.worktreeData?.repo?.default_branch || state.remoteData?.defaultBranch || 'main';
+  const mainBranch = state.remoteData?.targetBranch || getMainWorktreeBranch(state.worktreeData);
 
+  const shortSource = String(sourceBranch || '').replace(/^[^/]+\//, '');
   const branchNames = [];
   const addBranch = (b) => {
-    if (b && b !== sourceBranch && !branchNames.includes(b)) branchNames.push(b);
+    if (b && b !== sourceBranch && b !== shortSource && !branchNames.includes(b)) branchNames.push(b);
   };
   addBranch(mainBranch);
   for (const item of items) {
     if (item.branch) addBranch(item.branch);
+  }
+  for (const b of remoteLocalBranches) {
+    addBranch(b);
   }
   addBranch(defaultBranch);
 
@@ -777,12 +1133,45 @@ function getMergeableWorktreeBranches(targetBranch = '') {
     .map((item) => item.branch);
 }
 
+function getMergeableRemoteBranches(targetBranch = '') {
+  const items = state.remoteData?.items || [];
+  const defaultBranch = state.remoteData?.defaultBranch || 'main';
+  const effectiveTarget = targetBranch || state.remoteData?.targetBranch || defaultBranch;
+  return items
+    .filter(
+      (item) =>
+        !item.isDefault &&
+        item.branch !== effectiveTarget &&
+        item.fullRef !== effectiveTarget &&
+        item.ahead > 0
+    )
+    .map((item) => item.fullRef);
+}
+
+function configureMergeModalMode(isRemote, summaryText = '') {
+  state.mergeIsRemote = Boolean(isRemote);
+  $('local-merge-options')?.classList.toggle('hidden', state.mergeIsRemote);
+  $('remote-merge-options')?.classList.toggle('hidden', !state.mergeIsRemote);
+  const summaryEl = $('merge-source-summary');
+  if (summaryEl) {
+    if (summaryText) {
+      summaryEl.textContent = summaryText;
+      summaryEl.classList.remove('hidden');
+    } else {
+      summaryEl.textContent = '';
+      summaryEl.classList.add('hidden');
+    }
+  }
+}
+
 function openMergeModal(branch) {
   state.mergeAllMode = false;
   state.mergeTargetBranch = branch;
+  configureMergeModalMode(false, '');
   const titleEl = $('modal-merge-title');
   if (titleEl) titleEl.textContent = t('mergeModalTitle');
   populateMergeTargetSelect(branch);
+  if ($('merge-auto-push')) $('merge-auto-push').checked = true;
   $('merge-no-squash').checked = false;
   $('merge-no-rebase').checked = false;
   $('merge-no-ff').checked = false;
@@ -791,22 +1180,150 @@ function openMergeModal(branch) {
   openModal('modal-merge');
 }
 
+function openRemoteMergeModal(fullRef) {
+  state.mergeAllMode = false;
+  state.mergeTargetBranch = fullRef;
+  configureMergeModalMode(true, t('remoteMergeSummarySingle', { branch: fullRef }));
+  const titleEl = $('modal-merge-title');
+  if (titleEl) titleEl.textContent = t('remoteMergeModalTitle');
+  populateMergeTargetSelect(fullRef);
+  $('remote-merge-push').checked = true;
+  $('remote-merge-no-ff').checked = false;
+  $('remote-merge-squash').checked = false;
+  $('remote-merge-delete').checked = false;
+  openModal('modal-merge');
+}
+
 function openMergeAllModal() {
+  if (state.branchMode === 'remote') {
+    const branches = getMergeableRemoteBranches();
+    if (branches.length === 0) {
+      showToast(t('noMergeableRemoteToast'), 'info');
+      return;
+    }
+    state.mergeAllMode = true;
+    state.mergeTargetBranch = null;
+    configureMergeModalMode(true, t('remoteMergeSummaryAll', { count: branches.length }));
+    const titleEl = $('modal-merge-title');
+    if (titleEl) titleEl.textContent = t('remoteMergeAllModalTitle');
+    populateMergeTargetSelect('');
+    $('remote-merge-push').checked = true;
+    $('remote-merge-no-ff').checked = false;
+    $('remote-merge-squash').checked = false;
+    $('remote-merge-delete').checked = false;
+    openModal('modal-merge');
+    return;
+  }
+
   if (getMergeableWorktreeBranches().length === 0) {
     showToast(t('noMergeableBranchesToast'), 'info');
     return;
   }
   state.mergeAllMode = true;
   state.mergeTargetBranch = null;
+  configureMergeModalMode(false, '');
   const titleEl = $('modal-merge-title');
   if (titleEl) titleEl.textContent = t('mergeAllModalTitle');
   populateMergeTargetSelect('');
+  if ($('merge-auto-push')) $('merge-auto-push').checked = true;
   $('merge-no-squash').checked = false;
   $('merge-no-rebase').checked = false;
   $('merge-no-ff').checked = false;
   $('merge-no-remove').checked = false;
   $('merge-no-hooks').checked = false;
   openModal('modal-merge');
+}
+
+async function confirmRemoteMerge(active, target, btn, origLabel) {
+  const remoteOptions = {
+    projectId: active.id,
+    target,
+    autoPush: $('remote-merge-push').checked,
+    noFf: $('remote-merge-no-ff').checked,
+    squash: $('remote-merge-squash').checked,
+    deleteRemote: $('remote-merge-delete').checked,
+  };
+
+  if (!state.mergeAllMode) {
+    btn.disabled = true;
+    try {
+      const res = await api('/api/remote/merge', {
+        method: 'POST',
+        body: JSON.stringify({ ...remoteOptions, branch: state.mergeTargetBranch }),
+      });
+      appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
+      showToast(t('mergeSuccessToast', { branch: state.mergeTargetBranch }), 'success');
+      closeModal('modal-merge');
+      await Promise.all([refreshRemoteBranches(false), refreshWorktrees()]);
+    } catch (err) {
+      appendLog(t('mergeFailLog', { cmd: err.payload?.command || '' }), err.payload?.stderr || err.message);
+      if (err.payload?.hasConflicts && err.payload?.conflictSession) {
+        closeModal('modal-merge');
+        showToast(t('conflictDetectedToast'), 'info');
+        await openConflictModal(err.payload.conflictSession);
+        await Promise.all([refreshRemoteBranches(false), refreshWorktrees()]);
+      } else {
+        showToast(t('mergeFailToast', { msg: err.payload?.stderr || err.message }), 'error');
+      }
+    } finally {
+      btn.disabled = false;
+    }
+    return;
+  }
+
+  const branches = getMergeableRemoteBranches(target);
+  if (branches.length === 0) {
+    showToast(t('noMergeableRemoteToast'), 'info');
+    closeModal('modal-merge');
+    return;
+  }
+
+  btn.disabled = true;
+  let done = 0;
+  try {
+    for (let i = 0; i < branches.length; i += 1) {
+      const branch = branches[i];
+      const isLast = i === branches.length - 1;
+      btn.textContent = t('mergingProgressBtn', { done: done + 1, total: branches.length });
+      try {
+        const res = await api('/api/remote/merge', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...remoteOptions,
+            branch,
+            // When batch merging, push once on the final branch (unless deleteRemote is also set)
+            autoPush: remoteOptions.autoPush && isLast,
+          }),
+        });
+        done += 1;
+        appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
+      } catch (err) {
+        const msg = err.payload?.stderr || err.message;
+        appendLog(t('mergeFailLog', { cmd: err.payload?.command || branch }), msg);
+        if (err.payload?.hasConflicts && err.payload?.conflictSession) {
+          closeModal('modal-merge');
+          showToast(t('conflictDetectedToast'), 'info');
+          await openConflictModal(err.payload.conflictSession);
+        } else {
+          showToast(t('mergeAllPartialFailToast', { done, total: branches.length, branch, msg }), 'error');
+        }
+        await Promise.all([refreshRemoteBranches(false), refreshWorktrees()]);
+        return;
+      }
+    }
+    closeModal('modal-merge');
+    showToast(
+      t('remoteMergeAllSuccessToast', {
+        count: done,
+        target: target || state.remoteData?.targetBranch || 'main',
+      }),
+      'success'
+    );
+    await Promise.all([refreshRemoteBranches(false), refreshWorktrees()]);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origLabel;
+  }
 }
 
 async function confirmMerge() {
@@ -815,9 +1332,17 @@ async function confirmMerge() {
   const btn = $('btn-confirm-merge');
   const origLabel = btn.textContent;
   const target = $('merge-target').value.trim();
+
+  if (state.mergeIsRemote) {
+    await confirmRemoteMerge(active, target, btn, origLabel);
+    return;
+  }
+
+  const autoPush = Boolean($('merge-auto-push')?.checked);
   const commonOptions = {
     projectId: active.id,
     target,
+    autoPush,
     noSquash: $('merge-no-squash').checked,
     noRebase: $('merge-no-rebase').checked,
     noFf: $('merge-no-ff').checked,
@@ -838,7 +1363,14 @@ async function confirmMerge() {
       await refreshWorktrees();
     } catch (err) {
       appendLog(t('mergeFailLog', { cmd: err.payload?.command || '' }), err.payload?.stderr || err.message);
-      showToast(t('mergeFailToast', { msg: err.payload?.stderr || err.message }), 'error');
+      if (err.payload?.hasConflicts && err.payload?.conflictSession) {
+        closeModal('modal-merge');
+        showToast(t('conflictDetectedToast'), 'info');
+        await openConflictModal(err.payload.conflictSession);
+        await refreshWorktrees();
+      } else {
+        showToast(t('mergeFailToast', { msg: err.payload?.stderr || err.message }), 'error');
+      }
     } finally {
       btn.disabled = false;
     }
@@ -855,19 +1387,31 @@ async function confirmMerge() {
   btn.disabled = true;
   let done = 0;
   try {
-    for (const branch of branches) {
+    for (let i = 0; i < branches.length; i += 1) {
+      const branch = branches[i];
+      const isLast = i === branches.length - 1;
       btn.textContent = t('mergingProgressBtn', { done: done + 1, total: branches.length });
       try {
         const res = await api('/api/worktrees/merge', {
           method: 'POST',
-          body: JSON.stringify({ ...commonOptions, branch }),
+          body: JSON.stringify({
+            ...commonOptions,
+            branch,
+            autoPush: autoPush && isLast,
+          }),
         });
         done += 1;
         appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
       } catch (err) {
         const msg = err.payload?.stderr || err.message;
         appendLog(t('mergeFailLog', { cmd: err.payload?.command || branch }), msg);
-        showToast(t('mergeAllPartialFailToast', { done, total: branches.length, branch, msg }), 'error');
+        if (err.payload?.hasConflicts && err.payload?.conflictSession) {
+          closeModal('modal-merge');
+          showToast(t('conflictDetectedToast'), 'info');
+          await openConflictModal(err.payload.conflictSession);
+        } else {
+          showToast(t('mergeAllPartialFailToast', { done, total: branches.length, branch, msg }), 'error');
+        }
         await refreshWorktrees();
         return;
       }
@@ -878,6 +1422,407 @@ async function confirmMerge() {
   } finally {
     btn.disabled = false;
     btn.textContent = origLabel;
+  }
+}
+
+// Visual Conflict Resolver
+async function openConflictModal(session) {
+  const files = session.files || [];
+  const trackedFiles = files.map((f) => f.path);
+  const unresolvedCount = files.filter((f) => !f.resolved).length;
+  const autoPush = session.autoPush !== undefined ? Boolean(session.autoPush) : Boolean(session.isRemote);
+  state.conflictSession = {
+    workDir: session.workDir,
+    sourceBranch: session.sourceBranch || '',
+    targetBranch: session.targetBranch || '',
+    isRemote: Boolean(session.isRemote),
+    autoPush,
+    deleteRemote: Boolean(session.deleteRemote),
+    files,
+    trackedFiles,
+    unresolvedCount,
+    activeFile: files[0]?.path || '',
+    fileDetails: null,
+    viewMode: 'visual',
+  };
+  if ($('conflict-auto-push')) {
+    $('conflict-auto-push').checked = autoPush;
+  }
+  openModal('modal-conflict');
+  renderConflictHeaderAndSidebar();
+  if (state.conflictSession.activeFile) {
+    await loadConflictFile(state.conflictSession.activeFile);
+  } else {
+    renderConflictMainPane();
+  }
+}
+
+async function openExistingWorktreeConflictModal(workDir, branchName) {
+  const active = getActiveProject();
+  if (!active) return;
+  try {
+    const res = await api(
+      `/api/conflicts/status?projectId=${encodeURIComponent(active.id)}&workDir=${encodeURIComponent(workDir)}`
+    );
+    await openConflictModal({
+      workDir: res.status.workDir,
+      sourceBranch: '',
+      targetBranch: branchName,
+      isRemote: false,
+      autoPush: false,
+      deleteRemote: false,
+      files: res.status.files,
+    });
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function renderConflictHeaderAndSidebar() {
+  const cs = state.conflictSession;
+  if (!cs) return;
+
+  const branchBadge = $('conflict-branch-badge');
+  if (branchBadge) {
+    branchBadge.textContent = cs.sourceBranch
+      ? `${cs.sourceBranch} → ${cs.targetBranch || 'HEAD'}`
+      : cs.targetBranch || cs.workDir;
+  }
+
+  const countBadge = $('conflict-count-badge');
+  if (countBadge) {
+    if (cs.unresolvedCount > 0) {
+      countBadge.className = 'badge badge-danger';
+      countBadge.textContent = t('conflictRemainingBadge', { count: cs.unresolvedCount });
+    } else {
+      countBadge.className = 'badge badge-success';
+      countBadge.textContent = t('conflictAllResolvedBadge');
+    }
+  }
+
+  const completeBtn = $('btn-complete-conflict');
+  if (completeBtn) {
+    completeBtn.disabled = cs.unresolvedCount > 0;
+  }
+
+  const listEl = $('conflict-file-list');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+
+  for (const file of cs.files) {
+    const row = document.createElement('div');
+    row.className = `conflict-file-item${file.path === cs.activeFile ? ' active' : ''}`;
+    const badgeHtml = file.resolved
+      ? `<span class="badge badge-success">${escapeHtml(t('conflictFileResolvedBadge'))}</span>`
+      : file.hunkCount > 0
+        ? `<span class="badge badge-danger">${escapeHtml(t('conflictFileHunksBadge', { count: file.hunkCount }))}</span>`
+        : `<span class="badge badge-warn">${escapeHtml(t('conflictFileUnmergedBadge'))}</span>`;
+
+    row.innerHTML = `
+      <span class="conflict-file-name" title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</span>
+      ${badgeHtml}
+    `;
+    row.addEventListener('click', () => {
+      loadConflictFile(file.path);
+    });
+    listEl.appendChild(row);
+  }
+}
+
+async function loadConflictFile(filePath) {
+  const active = getActiveProject();
+  const cs = state.conflictSession;
+  if (!active || !cs || !filePath) return;
+
+  cs.activeFile = filePath;
+  renderConflictHeaderAndSidebar();
+
+  try {
+    const res = await api(
+      `/api/conflicts/file?projectId=${encodeURIComponent(active.id)}&workDir=${encodeURIComponent(cs.workDir)}&file=${encodeURIComponent(filePath)}`
+    );
+    cs.fileDetails = res.file;
+    renderConflictMainPane();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function setConflictViewMode(mode) {
+  if (!state.conflictSession) return;
+  state.conflictSession.viewMode = mode === 'raw' ? 'raw' : 'visual';
+  renderConflictMainPane();
+}
+
+function renderConflictMainPane() {
+  const cs = state.conflictSession;
+  if (!cs) return;
+
+  const isRaw = cs.viewMode === 'raw';
+  $('btn-conflict-view-visual')?.classList.toggle('active', !isRaw);
+  $('btn-conflict-view-raw')?.classList.toggle('active', isRaw);
+  $('conflict-visual-pane')?.classList.toggle('hidden', isRaw);
+  $('conflict-raw-pane')?.classList.toggle('hidden', !isRaw);
+  $('btn-save-conflict-file')?.classList.toggle('hidden', !isRaw);
+
+  const fileLabel = $('conflict-active-file');
+  if (fileLabel) fileLabel.textContent = cs.activeFile || '-';
+
+  const details = cs.fileDetails;
+  const visualPane = $('conflict-visual-pane');
+  const rawTextarea = $('conflict-raw-textarea');
+
+  if (!details) {
+    if (visualPane) visualPane.innerHTML = '';
+    if (rawTextarea) rawTextarea.value = '';
+    return;
+  }
+
+  if (rawTextarea) {
+    rawTextarea.value = details.content;
+  }
+
+  if (!visualPane) return;
+  visualPane.innerHTML = '';
+
+  if (details.hunkCount === 0 && details.resolved) {
+    const banner = document.createElement('div');
+    banner.className = 'conflict-resolved-banner';
+    banner.innerHTML = `
+      <span>${escapeHtml(t('conflictFileResolvedBanner'))}</span>
+      <button type="button" class="btn btn-secondary btn-sm btn-switch-raw">${escapeHtml(t('editInRawViewBtn'))}</button>
+    `;
+    banner.querySelector('.btn-switch-raw').addEventListener('click', () => setConflictViewMode('raw'));
+    visualPane.appendChild(banner);
+
+    const preview = document.createElement('pre');
+    preview.className = 'conflict-code-block';
+    preview.style.border = '1px solid var(--border)';
+    preview.style.borderRadius = '8px';
+    preview.style.background = 'var(--code-bg)';
+    preview.textContent = details.content;
+    visualPane.appendChild(preview);
+    return;
+  }
+
+  for (const seg of details.segments || []) {
+    if (seg.type === 'normal') {
+      const lines = seg.lines || [];
+      if (lines.length === 0) continue;
+      const snippet =
+        lines.length > 6
+          ? [...lines.slice(0, 3), `... (${lines.length - 6} lines) ...`, ...lines.slice(-3)].join('\n')
+          : lines.join('\n');
+      const ctx = document.createElement('div');
+      ctx.className = 'conflict-context-card';
+      ctx.textContent = snippet;
+      visualPane.appendChild(ctx);
+      continue;
+    }
+
+    if (seg.type === 'conflict') {
+      const h = seg.hunk;
+      const card = document.createElement('div');
+      card.className = 'conflict-hunk-card';
+      card.innerHTML = `
+        <div class="conflict-hunk-header">
+          <div class="conflict-hunk-title">
+            <span class="badge badge-danger">#${h.id + 1}</span>
+            <span>${escapeHtml(t('conflictHunkTitle', { index: h.id + 1, start: h.startLine, end: h.endLine }))}</span>
+          </div>
+          <div class="conflict-hunk-actions">
+            <button type="button" class="btn btn-primary btn-sm" data-choice="ours">${escapeHtml(t('acceptHunkOursBtn'))}</button>
+            <button type="button" class="btn btn-success btn-sm" data-choice="theirs">${escapeHtml(t('acceptHunkTheirsBtn'))}</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-choice="both">${escapeHtml(t('acceptHunkBothBtn'))}</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-choice="both_reverse">${escapeHtml(t('acceptHunkBothRevBtn'))}</button>
+          </div>
+        </div>
+        <div class="conflict-hunk-split">
+          <div class="conflict-side conflict-side-ours">
+            <div class="conflict-side-label">${escapeHtml(t('conflictSideOursLabel', { label: h.oursLabel }))}</div>
+            <pre class="conflict-code-block">${escapeHtml(h.oursText || ' ')}</pre>
+          </div>
+          <div class="conflict-side conflict-side-theirs">
+            <div class="conflict-side-label">${escapeHtml(t('conflictSideTheirsLabel', { label: h.theirsLabel }))}</div>
+            <pre class="conflict-code-block">${escapeHtml(h.theirsText || ' ')}</pre>
+          </div>
+        </div>
+      `;
+      card.querySelectorAll('[data-choice]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          applyHunkChoice(h.id, btn.getAttribute('data-choice'));
+        });
+      });
+      visualPane.appendChild(card);
+    }
+  }
+}
+
+async function updateConflictSessionFromResponse(res) {
+  const cs = state.conflictSession;
+  if (!cs) return;
+  cs.fileDetails = res.file;
+  cs.files = res.status.files;
+  cs.unresolvedCount = res.status.unresolvedCount;
+  renderConflictHeaderAndSidebar();
+  renderConflictMainPane();
+
+  if (res.file.resolved) {
+    showToast(t('conflictFileSavedToast', { file: res.file.path }), 'success');
+    const nextUnresolved = cs.files.find((f) => !f.resolved && f.path !== res.file.path);
+    if (nextUnresolved) {
+      await loadConflictFile(nextUnresolved.path);
+    }
+  }
+}
+
+async function applyHunkChoice(hunkIndex, hunkChoice) {
+  const active = getActiveProject();
+  const cs = state.conflictSession;
+  if (!active || !cs || !cs.activeFile) return;
+
+  try {
+    const res = await api('/api/conflicts/resolve', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: active.id,
+        workDir: cs.workDir,
+        filePath: cs.activeFile,
+        hunkIndex,
+        hunkChoice,
+        trackedFiles: cs.trackedFiles,
+      }),
+    });
+    await updateConflictSessionFromResponse(res);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function applyWholeFileStrategy(strategy) {
+  const active = getActiveProject();
+  const cs = state.conflictSession;
+  if (!active || !cs || !cs.activeFile) return;
+
+  try {
+    const res = await api('/api/conflicts/resolve', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: active.id,
+        workDir: cs.workDir,
+        filePath: cs.activeFile,
+        strategy,
+        trackedFiles: cs.trackedFiles,
+      }),
+    });
+    await updateConflictSessionFromResponse(res);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function saveRawConflictFile() {
+  const active = getActiveProject();
+  const cs = state.conflictSession;
+  if (!active || !cs || !cs.activeFile) return;
+
+  const content = $('conflict-raw-textarea').value;
+  if (/^<{7}\s|^={7}\s*$|^>{7}\s/m.test(content)) {
+    showToast(t('conflictMarkersRemainWarn'), 'error');
+    return;
+  }
+
+  try {
+    const res = await api('/api/conflicts/resolve', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: active.id,
+        workDir: cs.workDir,
+        filePath: cs.activeFile,
+        content,
+        stage: true,
+        trackedFiles: cs.trackedFiles,
+      }),
+    });
+    await updateConflictSessionFromResponse(res);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function completeConflictResolution() {
+  const active = getActiveProject();
+  const cs = state.conflictSession;
+  if (!active || !cs) return;
+
+  const btn = $('btn-complete-conflict');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api('/api/conflicts/complete', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: active.id,
+        workDir: cs.workDir,
+        sourceBranch: cs.sourceBranch,
+        targetBranch: cs.targetBranch,
+        isRemote: cs.isRemote,
+        autoPush: Boolean($('conflict-auto-push')?.checked ?? cs.autoPush),
+        deleteRemote: cs.deleteRemote,
+      }),
+    });
+    appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
+    showToast(t('conflictCompleteSuccessToast'), 'success');
+    closeModal('modal-conflict');
+    state.conflictSession = null;
+    await Promise.all([refreshWorktrees(), refreshRemoteBranches(false)]);
+  } catch (err) {
+    const msg = err.payload?.stderr || err.message;
+    appendLog(t('mergeFailLog', { cmd: err.payload?.command || '' }), msg);
+    showToast(t('mergeFailToast', { msg }), 'error');
+    if (btn && cs.unresolvedCount === 0) btn.disabled = false;
+  }
+}
+
+async function abortConflictResolution() {
+  const active = getActiveProject();
+  const cs = state.conflictSession;
+  if (!active || !cs) return;
+  if (!window.confirm(t('abortMergeConfirm'))) return;
+
+  try {
+    const res = await api('/api/conflicts/abort', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: active.id,
+        workDir: cs.workDir,
+      }),
+    });
+    appendLog(t('mergeAbortedLog', { cmd: res.command }), res.stdout || res.stderr);
+    showToast(t('mergeAbortedToast'), 'info');
+    closeModal('modal-conflict');
+    state.conflictSession = null;
+    await Promise.all([refreshWorktrees(), refreshRemoteBranches(false)]);
+  } catch (err) {
+    showToast(err.payload?.stderr || err.message, 'error');
+  }
+}
+
+async function deleteRemoteBranchRow(fullRef) {
+  const active = getActiveProject();
+  if (!active) return;
+  if (!window.confirm(t('deleteRemoteBranchConfirm', { branch: fullRef }))) return;
+  try {
+    const res = await api('/api/remote/delete', {
+      method: 'POST',
+      body: JSON.stringify({ projectId: active.id, branch: fullRef }),
+    });
+    appendLog(t('deleteRemoteSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
+    showToast(t('deleteRemoteSuccessToast', { branch: fullRef }), 'success');
+    await refreshRemoteBranches(false);
+  } catch (err) {
+    const msg = err.payload?.stderr || err.message;
+    appendLog(t('logFail', { target: err.payload?.command || fullRef }), msg);
+    showToast(msg, 'error');
   }
 }
 
@@ -992,6 +1937,9 @@ async function addTargetPath(rawPath) {
     closeModal('modal-browser');
     await loadState();
     await refreshWorktrees();
+    if (state.branchMode === 'remote') {
+      await refreshRemoteBranches(true);
+    }
   } catch (err) {
     showToast(err.message, 'error');
   }
@@ -1122,9 +2070,25 @@ function bindEvents() {
   $('btn-pick-folder').addEventListener('click', () => pickNative('folder'));
   $('btn-pick-workspace').addEventListener('click', () => pickNative('workspace'));
 
-  $('btn-refresh').addEventListener('click', refreshWorktrees);
+  $('btn-mode-local').addEventListener('click', () => setBranchMode('local'));
+  $('btn-mode-remote').addEventListener('click', () => setBranchMode('remote'));
+  $('btn-fetch-remote').addEventListener('click', () => refreshRemoteBranches(true));
+  $('toggle-hide-merged-remote').addEventListener('change', renderWorktrees);
+
+  $('btn-refresh').addEventListener('click', refreshCurrentList);
   $('btn-merge-all').addEventListener('click', openMergeAllModal);
   $('toggle-branches').addEventListener('change', refreshWorktrees);
+
+  $('remote-merge-squash').addEventListener('change', () => {
+    if ($('remote-merge-squash').checked) {
+      $('remote-merge-no-ff').checked = false;
+    }
+  });
+  $('remote-merge-no-ff').addEventListener('change', () => {
+    if ($('remote-merge-no-ff').checked) {
+      $('remote-merge-squash').checked = false;
+    }
+  });
 
   $('input-branch').addEventListener('input', updateCommandPreview);
   $('input-create').addEventListener('change', updateCommandPreview);
@@ -1173,6 +2137,14 @@ function bindEvents() {
   });
 
   $('btn-confirm-merge').addEventListener('click', confirmMerge);
+
+  $('btn-conflict-view-visual').addEventListener('click', () => setConflictViewMode('visual'));
+  $('btn-conflict-view-raw').addEventListener('click', () => setConflictViewMode('raw'));
+  $('btn-file-accept-ours').addEventListener('click', () => applyWholeFileStrategy('ours'));
+  $('btn-file-accept-theirs').addEventListener('click', () => applyWholeFileStrategy('theirs'));
+  $('btn-save-conflict-file').addEventListener('click', saveRawConflictFile);
+  $('btn-complete-conflict').addEventListener('click', completeConflictResolution);
+  $('btn-abort-conflict').addEventListener('click', abortConflictResolution);
 
   $('btn-manage-tools').addEventListener('click', () => {
     resetToolForm();
@@ -1243,7 +2215,11 @@ function applyLanguage(lang, persist = true) {
   if (state.env) renderEnv(false);
   renderSidebar();
   renderMainProject();
-  if (state.worktreeData) renderWorktrees();
+  renderWorktrees();
+  if (state.conflictSession) {
+    renderConflictHeaderAndSidebar();
+    renderConflictMainPane();
+  }
   if ($('tool-edit-id').value) {
     $('btn-tool-submit').textContent = t('saveChangesBtn');
   } else {

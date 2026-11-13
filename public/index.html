@@ -143,15 +143,24 @@
               <section class="list-card card">
                 <div class="card-header">
                   <div class="list-title-group">
-                    <h2 data-i18n="worktreeListTitle">工作树列表</h2>
+                    <h2 id="list-card-title" data-i18n="worktreeListTitle">工作树列表</h2>
                     <span id="wt-count" class="badge badge-neutral">0</span>
+                    <div class="mode-switch" role="tablist" data-i18n-aria="branchModeAria" aria-label="分支操作模式">
+                      <button type="button" id="btn-mode-local" class="mode-switch-btn active" role="tab" aria-selected="true" data-i18n="localModeBtn">本地模式</button>
+                      <button type="button" id="btn-mode-remote" class="mode-switch-btn" role="tab" aria-selected="false" data-i18n="remoteModeBtn">远程模式</button>
+                    </div>
                     <button id="btn-merge-all" class="btn btn-success btn-sm hidden" data-i18n="mergeAllBtn">全部合并</button>
                   </div>
                   <div class="list-controls">
-                    <label class="checkbox-label">
+                    <label id="local-branches-toggle-wrap" class="checkbox-label">
                       <input id="toggle-branches" type="checkbox" />
                       <span data-i18n="showUnlinkedBranches">显示无工作树分支</span>
                     </label>
+                    <label id="remote-hide-merged-wrap" class="checkbox-label hidden">
+                      <input id="toggle-hide-merged-remote" type="checkbox" />
+                      <span data-i18n="hideMergedRemote">隐藏已合并分支</span>
+                    </label>
+                    <button id="btn-fetch-remote" class="btn btn-primary btn-sm hidden" data-i18n="fetchRemoteBtn">拉取远程 (Fetch)</button>
                     <button id="btn-refresh" class="btn btn-secondary btn-sm" data-i18n="refreshList">刷新列表</button>
                   </div>
                 </div>
@@ -159,10 +168,10 @@
                   <table class="wt-table">
                     <thead>
                       <tr>
-                        <th data-i18n="colBranchStatus">分支与状态</th>
-                        <th data-i18n="colDiffDefault">与默认分支差异</th>
-                        <th data-i18n="colLatestCommit">最近提交</th>
-                        <th data-i18n="colWorktreePath">工作树路径</th>
+                        <th id="th-branch" data-i18n="colBranchStatus">分支与状态</th>
+                        <th id="th-diff" data-i18n="colDiffDefault">与默认分支差异</th>
+                        <th id="th-commit" data-i18n="colLatestCommit">最近提交</th>
+                        <th id="th-path" data-i18n="colWorktreePath">工作树路径</th>
                         <th class="col-actions" data-i18n="colActions">操作</th>
                       </tr>
                     </thead>
@@ -208,21 +217,78 @@
           <button class="btn-icon" data-close="modal-merge">✕</button>
         </div>
         <div class="modal-body">
+          <div id="merge-source-summary" class="merge-summary muted hidden"></div>
           <div class="field">
             <label for="merge-target" data-i18n="mergeTargetLabel">目标分支</label>
             <select id="merge-target"></select>
           </div>
-          <div class="merge-options">
+          <div id="local-merge-options" class="merge-options">
+            <label class="checkbox-label"><input id="merge-auto-push" type="checkbox" checked /> <span data-i18n-html="remoteMergePushHtml">合并后自动推送目标分支到远程 (<code>git push</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-squash" type="checkbox" /> <span data-i18n-html="mergeNoSquashHtml">保留提交历史 (<code>--no-squash</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-rebase" type="checkbox" /> <span data-i18n-html="mergeNoRebaseHtml">跳过变基 (<code>--no-rebase</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-ff" type="checkbox" /> <span data-i18n-html="mergeNoFfHtml">创建合并提交 (<code>--no-ff</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-remove" type="checkbox" /> <span data-i18n-html="mergeNoRemoveHtml">合并后保留工作树 (<code>--no-remove</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-hooks" type="checkbox" /> <span data-i18n-html="mergeNoHooksHtml">跳过钩子 (<code>--no-hooks</code>)</span></label>
           </div>
+          <div id="remote-merge-options" class="merge-options hidden">
+            <label class="checkbox-label"><input id="remote-merge-push" type="checkbox" checked /> <span data-i18n-html="remoteMergePushHtml">合并后自动推送目标分支到远程 (<code>git push</code>)</span></label>
+            <label class="checkbox-label"><input id="remote-merge-no-ff" type="checkbox" /> <span data-i18n-html="remoteMergeNoFfHtml">创建合并提交 (<code>--no-ff</code>)</span></label>
+            <label class="checkbox-label"><input id="remote-merge-squash" type="checkbox" /> <span data-i18n-html="remoteMergeSquashHtml">压缩合并为单个提交 (<code>--squash</code>)</span></label>
+            <label class="checkbox-label"><input id="remote-merge-delete" type="checkbox" /> <span data-i18n-html="remoteMergeDeleteHtml">合并后删除该远程源分支 (<code>git push --delete</code>)</span></label>
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-ghost" data-close="modal-merge" data-i18n="cancelBtn">取消</button>
           <button id="btn-confirm-merge" class="btn btn-success" data-i18n="confirmMergeBtn">确认合并</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Visual Conflict Resolver -->
+    <div id="modal-conflict" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close="modal-conflict"></div>
+      <div class="modal-dialog modal-xl">
+        <div class="modal-header">
+          <div class="conflict-header-left">
+            <h3 data-i18n="conflictModalTitle">可视化解决合并冲突</h3>
+            <span id="conflict-branch-badge" class="badge badge-info mono"></span>
+            <span id="conflict-count-badge" class="badge badge-danger"></span>
+          </div>
+          <button class="btn-icon" data-close="modal-conflict">✕</button>
+        </div>
+        <div class="modal-body conflict-modal-body">
+          <aside class="conflict-sidebar">
+            <div class="conflict-sidebar-title" data-i18n="conflictFilesTitle">冲突文件列表</div>
+            <div id="conflict-file-list" class="conflict-file-list"></div>
+          </aside>
+          <section class="conflict-main">
+            <div class="conflict-toolbar">
+              <div class="conflict-toolbar-left">
+                <code id="conflict-active-file" class="conflict-active-file">-</code>
+                <div class="mode-switch" role="tablist">
+                  <button type="button" id="btn-conflict-view-visual" class="mode-switch-btn active" data-i18n="conflictVisualViewBtn">分块对比视图</button>
+                  <button type="button" id="btn-conflict-view-raw" class="mode-switch-btn" data-i18n="conflictRawViewBtn">源码编辑视图</button>
+                </div>
+              </div>
+              <div class="conflict-toolbar-actions">
+                <button type="button" id="btn-file-accept-ours" class="btn btn-secondary btn-sm" data-i18n="acceptFileOursBtn">整文件采用当前分支 (Ours)</button>
+                <button type="button" id="btn-file-accept-theirs" class="btn btn-secondary btn-sm" data-i18n="acceptFileTheirsBtn">整文件采用传入分支 (Theirs)</button>
+                <button type="button" id="btn-save-conflict-file" class="btn btn-primary btn-sm hidden" data-i18n="saveAndMarkResolvedBtn">保存并标记已解决</button>
+              </div>
+            </div>
+            <div id="conflict-visual-pane" class="conflict-visual-pane"></div>
+            <div id="conflict-raw-pane" class="conflict-raw-pane hidden">
+              <textarea id="conflict-raw-textarea" class="conflict-raw-textarea" spellcheck="false"></textarea>
+            </div>
+          </section>
+        </div>
+        <div class="modal-footer conflict-modal-footer">
+          <button type="button" id="btn-abort-conflict" class="btn btn-danger-ghost" data-i18n="abortMergeBtn">放弃合并 (git merge --abort)</button>
+          <div class="conflict-footer-right">
+            <label class="checkbox-label"><input id="conflict-auto-push" type="checkbox" checked /> <span data-i18n-html="conflictAutoPushHtml">提交后自动推送到远程 (<code>git push</code>)</span></label>
+            <button type="button" class="btn btn-ghost" data-close="modal-conflict" data-i18n="closeBtn">关闭</button>
+            <button type="button" id="btn-complete-conflict" class="btn btn-success" data-i18n="completeMergeBtn">完成合并并提交</button>
+          </div>
         </div>
       </div>
     </div>
