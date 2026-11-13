@@ -1,0 +1,27 @@
+{
+  "name": "wt-ui",
+  "version": "0.1.0",
+  "description": "Visual web UI platform for Worktrunk (wt) git worktree workflows",
+  "type": "module",
+  "bin": {
+    "wt-ui": "./bin/wt-ui.js"
+  },
+  "scripts": {
+    "start": "node bin/wt-ui.js start",
+    "doctor": "node bin/wt-ui.js doctor",
+    "test": "node --test tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "worktrunk",
+    "git",
+    "worktree",
+    "ui",
+    "claude",
+    "cursor"
+  ],
+  "license": "MIT"
+}
+

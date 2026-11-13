@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>wt-ui — Worktrunk 可视化工作树平台</title>
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <script>
+      (() => {
+        try {
+          const savedTheme = localStorage.getItem('wt-ui-theme');
+          const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+          document.documentElement.dataset.theme =
+            savedTheme === 'light' || savedTheme === 'dark' ? savedTheme : (prefersLight ? 'light' : 'dark');
+        } catch {
+          document.documentElement.dataset.theme = 'dark';
+        }
+        try {
+          const savedLang = localStorage.getItem('wt-ui-lang');
+          const sysLang = ((navigator.language || navigator.userLanguage || '') + '').toLowerCase();
+          const lang = savedLang === 'zh' || savedLang === 'en' ? savedLang : (sysLang.startsWith('zh') ? 'zh' : 'en');
+          document.documentElement.dataset.lang = lang;
+          document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+        } catch {
+          document.documentElement.dataset.lang = 'en';
+          document.documentElement.lang = 'en';
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <img src="/logo.png" alt="wt-ui" class="brand-logo" />
+          <div>
+            <div class="brand-title">wt-ui</div>
+            <div class="brand-sub" data-i18n="brandSub">Worktrunk 可视化操作平台</div>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div id="env-badge" class="env-badge env-loading" data-i18n="envChecking">检查环境中...</div>
+          <button id="btn-manage-tools" class="btn btn-ghost" data-i18n="manageTools">工具配置</button>
+          <button
+            type="button"
+            id="btn-lang-toggle"
+            class="btn btn-secondary lang-toggle-btn"
+            title="切换语言 / Switch Language"
+            aria-label="切换语言 / Switch Language"
+          >中文</button>
+          <button
+            type="button"
+            id="btn-theme-toggle"
+            class="btn btn-secondary theme-toggle-btn"
+            title="切换白天/黑夜模式"
+            aria-label="切换白天/黑夜模式"
+          >
+            <svg class="theme-icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4"></circle>
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+            </svg>
+            <svg class="theme-icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <div id="env-banner" class="env-banner hidden">
+        <span id="env-banner-text"></span>
+        <div class="env-banner-actions">
+          <button id="btn-open-install-guide" class="btn btn-secondary btn-sm" data-i18n="viewInstallGuide">查看安装引导</button>
+          <button id="btn-recheck-env" class="btn btn-primary btn-sm" data-i18n="recheckEnv">重新检测</button>
+        </div>
+      </div>
+
+      <div class="workspace-layout">
+        <aside class="sidebar">
+          <div class="sidebar-header">
+            <span class="sidebar-title" data-i18n="sidebarTitle">项目与工作区</span>
+            <button id="btn-add-target" class="btn btn-primary btn-sm" data-i18n="addBtn">+ 添加</button>
+          </div>
+          <div id="project-tree" class="project-tree">
+            <div class="empty-hint" data-i18n="emptySidebarHint">点击上方「+ 添加」选择项目文件夹或 .code-workspace 文件</div>
+          </div>
+        </aside>
+
+        <main class="main-panel">
+          <div id="project-tabs" class="project-tabs hidden" role="tablist" data-i18n-aria="openTabsLabel" aria-label="已打开的项目"></div>
+
+          <div id="no-project-state" class="empty-state">
+            <h2 data-i18n="welcomeTitle">欢迎使用 wt-ui</h2>
+            <p data-i18n-html="welcomeDesc">选择一个 Git 项目文件夹或 VS Code / Cursor 的 <code>.code-workspace</code> 工作区文件，即可可视化创建工作树、用 CLI/GUI 工具打开开发，并在完成后一键合并。</p>
+            <button id="btn-empty-add" class="btn btn-primary" data-i18n="chooseProjectOrWs">选择项目或工作区</button>
+          </div>
+
+          <div id="project-view" class="project-split hidden">
+            <div class="project-left">
+              <section class="create-card card">
+                <form id="switch-form" class="switch-form">
+                  <div class="form-row">
+                    <div class="field field-grow">
+                      <label for="input-branch" data-i18n="branchNameLabel">分支名称</label>
+                      <div class="input-with-btn">
+                        <input id="input-branch" type="text" data-i18n-placeholder="branchPlaceholder" placeholder="例如 main_20261113102530" required />
+                        <button type="button" id="btn-random-branch" class="btn btn-secondary btn-sm" data-i18n="generateBtn" data-i18n-title="generateBtnTitle" title="根据基于分支和当前时间戳重新生成">生成</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="field field-grow">
+                      <label for="input-base" data-i18n="baseBranchLabel">基于分支 (--base)</label>
+                      <select id="input-base"></select>
+                    </div>
+                    <div class="field field-grow">
+                      <label for="select-tool" data-i18n="selectToolLabel">选择打开工具 (CLI / GUI)</label>
+                      <select id="select-tool"></select>
+                    </div>
+                  </div>
+                  <div class="form-row form-row-bottom">
+                    <label class="checkbox-label">
+                      <input id="input-create" type="checkbox" checked />
+                      <span data-i18n-html="createNewBranchHtml">创建新分支 (<code>-c</code>)</span>
+                    </label>
+                    <button type="submit" id="btn-switch-submit" class="btn btn-primary" data-i18n="createAndOpen">
+                      创建并打开
+                    </button>
+                  </div>
+                </form>
+              </section>
+
+              <section class="log-card card">
+                <div class="card-header">
+                  <h3 data-i18n="commandLogTitle">命令执行日志</h3>
+                  <button id="btn-clear-log" class="btn btn-ghost btn-sm" data-i18n="clearBtn">清空</button>
+                </div>
+                <pre id="command-log" class="command-log">等待操作...</pre>
+              </section>
+            </div>
+
+            <div class="project-right">
+              <section class="list-card card">
+                <div class="card-header">
+                  <div class="list-title-group">
+                    <h2 data-i18n="worktreeListTitle">工作树列表</h2>
+                    <span id="wt-count" class="badge badge-neutral">0</span>
+                    <button id="btn-merge-all" class="btn btn-success btn-sm hidden" data-i18n="mergeAllBtn">全部合并</button>
+                  </div>
+                  <div class="list-controls">
+                    <label class="checkbox-label">
+                      <input id="toggle-branches" type="checkbox" />
+                      <span data-i18n="showUnlinkedBranches">显示无工作树分支</span>
+                    </label>
+                    <button id="btn-refresh" class="btn btn-secondary btn-sm" data-i18n="refreshList">刷新列表</button>
+                  </div>
+                </div>
+                <div id="worktree-table-wrap" class="table-wrap">
+                  <table class="wt-table">
+                    <thead>
+                      <tr>
+                        <th data-i18n="colBranchStatus">分支与状态</th>
+                        <th data-i18n="colDiffDefault">与默认分支差异</th>
+                        <th data-i18n="colLatestCommit">最近提交</th>
+                        <th data-i18n="colWorktreePath">工作树路径</th>
+                        <th class="col-actions" data-i18n="colActions">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="worktree-tbody"></tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <!-- Modal: Add Project / Workspace Browser -->
+    <div id="modal-browser" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close="modal-browser"></div>
+      <div class="modal-dialog modal-lg">
+        <div class="modal-header">
+          <h3 data-i18n="browserModalTitle">添加项目文件夹或工作区 (.code-workspace)</h3>
+          <button class="btn-icon" data-close="modal-browser">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="browser-path-bar">
+            <button id="btn-browse-up" class="btn btn-secondary btn-sm" data-i18n="parentDirBtn">上级目录</button>
+            <input id="input-browse-path" type="text" data-i18n-placeholder="browsePathPlaceholder" placeholder="输入目录路径后按回车跳转，或点击下方选择" />
+            <button id="btn-add-direct" class="btn btn-primary btn-sm" data-i18n="addCurrentPathBtn">添加当前路径</button>
+          </div>
+          <div class="browser-native-bar">
+            <button id="btn-pick-folder" class="btn btn-secondary btn-sm" data-i18n="pickFolderBtn">选择本地文件夹...</button>
+            <button id="btn-pick-workspace" class="btn btn-secondary btn-sm" data-i18n="pickWorkspaceBtn">选择 .code-workspace 文件...</button>
+          </div>
+          <div id="browser-list" class="browser-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Merge Confirmation -->
+    <div id="modal-merge" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close="modal-merge"></div>
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h3 id="modal-merge-title" data-i18n="mergeModalTitle">一键合并分支</h3>
+          <button class="btn-icon" data-close="modal-merge">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="field">
+            <label for="merge-target" data-i18n="mergeTargetLabel">目标分支</label>
+            <select id="merge-target"></select>
+          </div>
+          <div class="merge-options">
+            <label class="checkbox-label"><input id="merge-no-squash" type="checkbox" /> <span data-i18n-html="mergeNoSquashHtml">保留提交历史 (<code>--no-squash</code>)</span></label>
+            <label class="checkbox-label"><input id="merge-no-rebase" type="checkbox" /> <span data-i18n-html="mergeNoRebaseHtml">跳过变基 (<code>--no-rebase</code>)</span></label>
+            <label class="checkbox-label"><input id="merge-no-ff" type="checkbox" /> <span data-i18n-html="mergeNoFfHtml">创建合并提交 (<code>--no-ff</code>)</span></label>
+            <label class="checkbox-label"><input id="merge-no-remove" type="checkbox" /> <span data-i18n-html="mergeNoRemoveHtml">合并后保留工作树 (<code>--no-remove</code>)</span></label>
+            <label class="checkbox-label"><input id="merge-no-hooks" type="checkbox" /> <span data-i18n-html="mergeNoHooksHtml">跳过钩子 (<code>--no-hooks</code>)</span></label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" data-close="modal-merge" data-i18n="cancelBtn">取消</button>
+          <button id="btn-confirm-merge" class="btn btn-success" data-i18n="confirmMergeBtn">确认合并</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Custom Tools -->
+    <div id="modal-tools" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close="modal-tools"></div>
+      <div class="modal-dialog modal-lg">
+        <div class="modal-header">
+          <h3 data-i18n="toolsModalTitle">开发工具配置</h3>
+          <button class="btn-icon" data-close="modal-tools">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="custom-tool-section">
+            <form id="custom-tool-form" class="custom-tool-form">
+              <input id="tool-edit-id" type="hidden" />
+              <div class="custom-tool-inline-row">
+                <div class="field tool-kind-field">
+                  <label data-i18n="toolKindLabel">类型</label>
+                  <select id="tool-kind">
+                    <option value="cli" data-i18n="toolKindCliOption">命令行 (CLI)</option>
+                    <option value="gui" data-i18n="toolKindGuiOption">图形界面 (GUI)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label data-i18n="toolNameLabel">名称</label>
+                  <input id="tool-name" type="text" placeholder="Zed / Aider" required />
+                </div>
+                <div class="field">
+                  <label data-i18n="toolCmdLabel">可执行命令</label>
+                  <input id="tool-cmd" type="text" placeholder="zed / aider" required />
+                </div>
+                <div class="field">
+                  <label data-i18n="toolArgsLabel">默认参数</label>
+                  <input id="tool-args" type="text" data-i18n-placeholder="toolArgsPlaceholder" placeholder="如 ." />
+                </div>
+                <div class="tool-form-actions">
+                  <button type="button" id="btn-cancel-tool-edit" class="btn btn-ghost btn-sm hidden" data-i18n="cancelBtn">取消</button>
+                  <button type="submit" id="btn-tool-submit" class="btn btn-primary" data-i18n="addToolBtn">添加工具</button>
+                </div>
+              </div>
+            </form>
+          </div>
+          <hr class="divider" />
+          <div id="tools-list" class="tools-columns"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Worktrunk Install Guide -->
+    <div id="modal-install" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close="modal-install"></div>
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h3 data-i18n="installModalTitle">Worktrunk 安装与环境引导</h3>
+          <button class="btn-icon" data-close="modal-install">✕</button>
+        </div>
+        <div id="install-guide-body" class="modal-body"></div>
+        <div class="modal-footer">
+          <button id="btn-auto-install-wt" class="btn btn-success" data-i18n="autoInstallBtn">国内源自动安装</button>
+          <button id="btn-modal-recheck" class="btn btn-primary" data-i18n="recheckEnvModalBtn">重新检测环境</button>
+          <button class="btn btn-ghost" data-close="modal-install" data-i18n="closeBtn">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast-container" class="toast-container"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
