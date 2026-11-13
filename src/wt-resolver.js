@@ -77,20 +77,23 @@ async function collectWtCandidates(explicitBin) {
   if (existsSync(managedBin)) add(managedBin);
 
   const locator = process.platform === 'win32' ? 'where.exe' : 'which';
-  const names = process.platform === 'win32' ? ['wt', 'git-wt'] : ['wt', 'git-wt'];
+  const names = ['wt', 'git-wt'];
   for (const name of names) {
-    const locatorArgs = process.platform === 'win32' ? [name] : ['-a', name];
-    try {
-      const { stdout } = await execFileAsync(locator, locatorArgs, {
-        timeout: 3000,
-        windowsHide: true,
-      });
-      for (const line of stdout.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (trimmed) add(trimmed);
+    const argVariants = process.platform === 'win32' ? [[name]] : [['-a', name], [name]];
+    for (const locatorArgs of argVariants) {
+      try {
+        const { stdout } = await execFileAsync(locator, locatorArgs, {
+          timeout: 3000,
+          windowsHide: true,
+        });
+        for (const line of stdout.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (trimmed) add(trimmed);
+        }
+        break;
+      } catch {
+        // Try fallback args or ignore when binary is not on PATH
       }
-    } catch {
-      // Ignore when binary is not on PATH
     }
   }
 
@@ -113,8 +116,10 @@ async function collectWtCandidates(explicitBin) {
     if (existsSync(cargoExe)) add(cargoExe);
   } else {
     add(join(homedir(), '.cargo', 'bin', 'wt'));
+    add(join(homedir(), '.local', 'bin', 'wt'));
     add('/opt/homebrew/bin/wt');
     add('/usr/local/bin/wt');
+    add('/home/linuxbrew/.linuxbrew/bin/wt');
   }
 
   return candidates;

@@ -40,13 +40,40 @@ export const BUILTIN_TOOLS = [
     description: '在工作树中启动 Gemini CLI',
   },
   {
-    id: 'terminal',
-    name: 'Terminal / Shell',
+    id: 'codebuddy-cli',
+    name: 'CodeBuddy CLI',
     kind: 'cli',
-    command: process.platform === 'win32' ? 'cmd.exe' : process.env.SHELL || 'bash',
+    command: 'codebuddy',
     args: [],
-    supportsPrompt: false,
-    description: '在工作树目录打开系统终端',
+    supportsPrompt: true,
+    description: '在工作树中启动 CodeBuddy Code CLI',
+  },
+  {
+    id: 'qwen-code',
+    name: 'Qwen Code',
+    kind: 'cli',
+    command: 'qwen',
+    args: [],
+    supportsPrompt: true,
+    description: '在工作树中启动 Qwen Code CLI',
+  },
+  {
+    id: 'kimi-cli',
+    name: 'Kimi CLI',
+    kind: 'cli',
+    command: 'kimi',
+    args: [],
+    supportsPrompt: true,
+    description: '在工作树中启动 Kimi CLI',
+  },
+  {
+    id: 'trae-cli',
+    name: 'Trae CLI',
+    kind: 'cli',
+    command: 'traecli',
+    args: [],
+    supportsPrompt: true,
+    description: '在工作树中启动 Trae CLI',
   },
   {
     id: 'cursor',
@@ -74,6 +101,78 @@ export const BUILTIN_TOOLS = [
     args: ['.'],
     supportsPrompt: false,
     description: '使用 Windsurf 打开工作树',
+  },
+  {
+    id: 'qoder',
+    name: 'Qoder',
+    kind: 'gui',
+    command: 'qoder',
+    args: ['.'],
+    supportsPrompt: false,
+    description: '使用 Qoder 打开工作树',
+  },
+  {
+    id: 'trae',
+    name: 'Trae',
+    kind: 'gui',
+    command: 'trae',
+    args: ['.'],
+    supportsPrompt: false,
+    description: '使用 Trae 国际版打开工作树',
+  },
+  {
+    id: 'trae-zh',
+    name: 'Trae zh',
+    kind: 'gui',
+    command: 'trae-cn',
+    args: ['.'],
+    supportsPrompt: false,
+    description: '使用 Trae 国内版打开工作树',
+  },
+  {
+    id: 'codebuddy',
+    name: 'CodeBuddy',
+    kind: 'gui',
+    command: 'buddy',
+    args: ['.'],
+    supportsPrompt: false,
+    description: '使用 CodeBuddy IDE 国际版打开工作树',
+  },
+  {
+    id: 'codebuddy-zh',
+    name: 'CodeBuddy zh',
+    kind: 'gui',
+    command: 'buddy-cn',
+    args: ['.'],
+    supportsPrompt: false,
+    description: '使用 CodeBuddy IDE 国内版打开工作树',
+  },
+  {
+    id: 'antigravity',
+    name: 'Antigravity IDE',
+    kind: 'gui',
+    command: 'antigravity-ide',
+    args: ['.'],
+    supportsPrompt: false,
+    description: '使用 Antigravity IDE 打开工作树',
+  },
+  {
+    id: 'kiro',
+    name: 'Kiro',
+    kind: 'gui',
+    command: 'kiro',
+    args: ['.'],
+    supportsPrompt: false,
+    description: '使用 Kiro IDE 打开工作树',
+  },
+  {
+    id: 'zed',
+    name: 'Zed',
+    kind: 'gui',
+    command: 'zed',
+    args: ['.'],
+    supportsPrompt: false,
+    description: '使用 Zed 编辑器打开工作树',
   },
 ];
 
@@ -131,6 +230,37 @@ function quoteCmdArg(arg) {
 }
 
 /**
+ * Quote an argument safely for POSIX shells (macOS / Linux).
+ */
+function quotePosixArg(arg) {
+  const s = String(arg ?? '');
+  if (s.length > 0 && /^[A-Za-z0-9_./:@%+=,-]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Pick an available terminal emulator on Linux.
+ */
+function findLinuxTerminal() {
+  const candidates = [
+    { bin: 'x-terminal-emulator', argsPrefix: ['-e'] },
+    { bin: 'gnome-terminal', argsPrefix: ['--'] },
+    { bin: 'konsole', argsPrefix: ['-e'] },
+    { bin: 'xfce4-terminal', argsPrefix: ['-e'] },
+    { bin: 'kitty', argsPrefix: [] },
+    { bin: 'alacritty', argsPrefix: ['-e'] },
+    { bin: 'xterm', argsPrefix: ['-e'] },
+  ];
+  const pathDirs = (process.env.PATH || '').split(':').filter(Boolean);
+  for (const cand of candidates) {
+    if (pathDirs.some((dir) => existsSync(`${dir}/${cand.bin}`))) {
+      return cand;
+    }
+  }
+  return candidates[0];
+}
+
+/**
  * Spawn an interactive CLI tool inside a new terminal window at `worktreePath`.
  * If `wtBin` and `repoPath` and `branch` are provided, runs `wt -C <repoPath> switch <branch> -x <cmd>`
  * so Worktrunk hooks and environment are preserved.
@@ -167,23 +297,33 @@ export function spawnInNewTerminal({ wtBin, repoPath, branch, tool, prompt, work
   }
 
   if (process.platform === 'darwin') {
-    const cmdParts =
+    const shellLine =
       tool.id === 'terminal'
-        ? [`cd ${JSON.stringify(worktreePath)}`]
+        ? `cd ${quotePosixArg(worktreePath)}`
         : wtBin && repoPath && branch
           ? [wtBin, '-C', repoPath, 'switch', branch, '-y', '-x', tool.command, ...(extraArgs.length ? ['--', ...extraArgs] : [])]
-          : [tool.command, ...extraArgs];
-    const shellLine = tool.id === 'terminal' ? cmdParts[0] : cmdParts.map((p) => JSON.stringify(p)).join(' ');
+              .map(quotePosixArg)
+              .join(' ')
+          : [tool.command, ...extraArgs].map(quotePosixArg).join(' ');
     const script = `tell application "Terminal" to do script ${JSON.stringify(shellLine)}`;
     const child = spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' });
     child.unref();
     return;
   }
 
-  // Linux fallback
-  const termCmd = tool.id === 'terminal' ? process.env.SHELL || 'bash' : tool.command;
-  const child = spawn('x-terminal-emulator', ['-e', termCmd, ...extraArgs], {
-    cwd: worktreePath || repoPath,
+  // Linux
+  const term = findLinuxTerminal();
+  const cwd = worktreePath && existsSync(worktreePath) ? worktreePath : repoPath;
+  let cmdArgs;
+  if (tool.id === 'terminal') {
+    cmdArgs = [process.env.SHELL || 'bash'];
+  } else if (wtBin && repoPath && branch) {
+    cmdArgs = [wtBin, '-C', repoPath, 'switch', branch, '-y', '-x', tool.command, ...(extraArgs.length ? ['--', ...extraArgs] : [])];
+  } else {
+    cmdArgs = [tool.command, ...extraArgs];
+  }
+  const child = spawn(term.bin, [...term.argsPrefix, ...cmdArgs], {
+    cwd,
     detached: true,
     stdio: 'ignore',
   });

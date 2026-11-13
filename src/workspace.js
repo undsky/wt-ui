@@ -287,15 +287,29 @@ export async function pickNativePath(mode = 'folder') {
     }
   }
 
-  const args =
+  const zenityArgs =
     mode === 'workspace'
       ? ['--file-selection', '--file-filter=*.code-workspace']
       : ['--file-selection', '--directory'];
   try {
-    const { stdout } = await execFileAsync('zenity', args, { timeout: 120_000 });
+    const { stdout } = await execFileAsync('zenity', zenityArgs, { timeout: 120_000 });
     const selected = (stdout || '').trim();
     return { cancelled: !selected, path: selected || null };
-  } catch {
+  } catch (err) {
+    // Fallback to kdialog on KDE/Qt Linux desktops when zenity is unavailable
+    if (err?.code === 'ENOENT') {
+      const kdialogArgs =
+        mode === 'workspace'
+          ? ['--getopenfilename', homedir(), '*.code-workspace|Workspace (*.code-workspace)']
+          : ['--getexistingdirectory', homedir()];
+      try {
+        const { stdout } = await execFileAsync('kdialog', kdialogArgs, { timeout: 120_000 });
+        const selected = (stdout || '').trim();
+        return { cancelled: !selected, path: selected || null };
+      } catch {
+        return { cancelled: true, path: null };
+      }
+    }
     return { cancelled: true, path: null };
   }
 }
