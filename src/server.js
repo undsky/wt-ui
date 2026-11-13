@@ -400,11 +400,13 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           return;
         }
 
-        const tool = findToolById(body.toolId || project.defaultToolId || 'claude', store.customTools);
+        const branch = String(body.branch).trim();
+        const resolvedToolId = body.toolId || project.worktreeTools?.[branch] || project.defaultToolId || 'claude';
+        const tool = findToolById(resolvedToolId, store.customTools);
         const result = await switchAndOpenWorktree({
           wtBin: env.wtBin,
           repoPath: project.path,
-          branch: String(body.branch).trim(),
+          branch,
           create: Boolean(body.create),
           clobber: Boolean(body.clobber),
           base: body.base ? String(body.base).trim() : '',
@@ -412,7 +414,21 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           prompt: body.prompt ? String(body.prompt).trim() : '',
         });
 
-        sendJson(res, result.ok ? 200 : 422, result);
+        if (result.ok && tool?.id) {
+          if (!project.worktreeTools || typeof project.worktreeTools !== 'object') {
+            project.worktreeTools = {};
+          }
+          if (body.toolId || !project.worktreeTools[branch]) {
+            project.worktreeTools[branch] = tool.id;
+            saveStore(store);
+          }
+        }
+
+        sendJson(res, result.ok ? 200 : 422, {
+          ...result,
+          toolId: tool?.id || null,
+          worktreeTools: project.worktreeTools || {},
+        });
         return;
       }
 
@@ -502,19 +518,28 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           return;
         }
 
-        const args = ['remove', String(body.branch).trim(), '--foreground', '--format=json', '-y'];
+        const targetBranch = String(body.branch).trim();
+        const args = ['remove', targetBranch, '--foreground', '--format=json', '-y'];
         if (body.force) args.push('--force');
         if (body.forceDelete) args.push('-D');
         if (body.noDeleteBranch) args.push('--no-delete-branch');
 
         const result = await runWt(env.wtBin, project.path, args);
         const parsed = parseWtJson(result.stdout);
+        const outcome = Array.isArray(parsed) ? parsed[0]?.branch_outcome : parsed?.branch_outcome;
+        if (result.ok && outcome !== 'retained_unmerged' && outcome !== 'retained_failed') {
+          if (project.worktreeTools && targetBranch in project.worktreeTools) {
+            delete project.worktreeTools[targetBranch];
+            saveStore(store);
+          }
+        }
         sendJson(res, result.ok ? 200 : 422, {
           ok: result.ok,
           command: result.command,
           data: parsed,
           stdout: result.stdout,
           stderr: result.stderr,
+          worktreeTools: project.worktreeTools || {},
         });
         return;
       }

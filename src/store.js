@@ -65,6 +65,9 @@ export function addStandaloneProject(store, { name, path, defaultToolId }) {
   if (existing) {
     if (name) existing.name = name;
     if (defaultToolId !== undefined) existing.defaultToolId = defaultToolId;
+    if (!existing.worktreeTools || typeof existing.worktreeTools !== 'object') {
+      existing.worktreeTools = {};
+    }
     store.activeProjectId = existing.id;
     return existing;
   }
@@ -74,6 +77,7 @@ export function addStandaloneProject(store, { name, path, defaultToolId }) {
     path: absPath,
     workspaceId: null,
     defaultToolId: defaultToolId || 'claude',
+    worktreeTools: {},
     addedAt: new Date().toISOString(),
   };
   store.projects.push(project);
@@ -108,12 +112,16 @@ export function importWorkspaceProjects(store, workspaceData) {
         path: absPath,
         workspaceId: ws.id,
         defaultToolId: 'claude',
+        worktreeTools: {},
         addedAt: new Date().toISOString(),
       };
       store.projects.push(proj);
     } else {
       proj.workspaceId = ws.id;
       if (item.name) proj.name = item.name;
+      if (!proj.worktreeTools || typeof proj.worktreeTools !== 'object') {
+        proj.worktreeTools = {};
+      }
     }
     importedProjects.push(proj);
   }

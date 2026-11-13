@@ -91,6 +91,13 @@ function getToolById(toolId) {
   return state.tools.find((t) => t.id === toolId) || null;
 }
 
+function getWorktreeTool(branchName) {
+  const active = getActiveProject();
+  const savedToolId = branchName ? active?.worktreeTools?.[branchName] : null;
+  const toolId = savedToolId || active?.defaultToolId || 'claude';
+  return getToolById(toolId) || getToolById('claude') || state.tools[0] || null;
+}
+
 let isAutoInstalling = false;
 
 async function triggerAutoInstallWt() {
@@ -613,8 +620,8 @@ function renderWorktrees() {
       ? `<span class="mono">${escapeHtml(wt.path)}</span>`
       : '<span class="muted">—</span>';
 
-    const selectedTool = getToolById($('select-tool').value || 'claude');
-    const openLabel = hasWorktree ? t('openWithTool', { tool: selectedTool?.name || t('toolFallback') }) : t('createAndOpen');
+    const boundTool = getWorktreeTool(branchName);
+    const openLabel = hasWorktree ? t('openWithTool', { tool: boundTool?.name || t('toolFallback') }) : t('createAndOpen');
     const remoteAhead = item.remote?.ahead || 0;
     const pushLabel = remoteAhead > 0 ? t('pushBtnAhead', { ahead: remoteAhead }) : t('pushBtn');
     const pushBtnCls = remoteAhead > 0 ? 'btn-primary' : 'btn-secondary';
@@ -676,7 +683,8 @@ function renderWorktrees() {
     }
 
     tr.querySelector('.btn-open-wt').addEventListener('click', () => {
-      openWorktreeRow(branchName, false);
+      const toolId = hasWorktree ? boundTool?.id : ($('select-tool').value || 'claude');
+      openWorktreeRow(branchName, false, '', toolId);
     });
 
     const mergeBtn = tr.querySelector('.btn-merge-wt');
@@ -711,8 +719,6 @@ function renderRemoteBranches() {
     tbody.innerHTML = `<tr><td colspan="5" class="muted">${escapeHtml(t('noRemoteData'))}</td></tr>`;
     return;
   }
-
-  const selectedTool = getToolById($('select-tool').value || 'claude');
 
   for (const item of items) {
     const tr = document.createElement('tr');
@@ -752,8 +758,9 @@ function renderRemoteBranches() {
       metaParts.push(`<span class="muted">${escapeHtml(item.head.author)}</span>`);
     }
 
+    const boundTool = getWorktreeTool(item.branch);
     const openLabel = item.worktreePath
-      ? t('openWithTool', { tool: selectedTool?.name || t('toolFallback') })
+      ? t('openWithTool', { tool: boundTool?.name || t('toolFallback') })
       : t('checkoutWorktreeBtn');
 
     tr.innerHTML = `
@@ -793,7 +800,8 @@ function renderRemoteBranches() {
 
     tr.querySelector('.btn-checkout-remote').addEventListener('click', () => {
       const shouldCreate = !item.hasLocalBranch && !item.worktreePath;
-      openWorktreeRow(item.branch, shouldCreate, shouldCreate ? item.fullRef : '');
+      const toolId = item.worktreePath ? boundTool?.id : ($('select-tool').value || 'claude');
+      openWorktreeRow(item.branch, shouldCreate, shouldCreate ? item.fullRef : '', toolId);
     });
 
     const delBtn = tr.querySelector('.btn-delete-remote');
@@ -840,6 +848,9 @@ async function refreshWorktrees() {
   const branches = $('toggle-branches').checked ? '1' : '0';
   try {
     const res = await api(`/api/worktrees?projectId=${encodeURIComponent(active.id)}&branches=${branches}`);
+    if (res.project?.worktreeTools) {
+      active.worktreeTools = res.project.worktreeTools;
+    }
     state.worktreeCache[active.id] = res.data;
     if (state.activeProjectId === active.id) {
       state.worktreeData = res.data;
@@ -976,10 +987,10 @@ async function switchWorktreeWithClobberPrompt(payload) {
   }
 }
 
-async function openWorktreeRow(branch, shouldCreate, base = '') {
+async function openWorktreeRow(branch, shouldCreate, base = '', explicitToolId = '') {
   const active = getActiveProject();
   if (!active) return;
-  const toolId = $('select-tool').value || 'claude';
+  const toolId = explicitToolId || getWorktreeTool(branch)?.id || 'claude';
   try {
     const res = await switchWorktreeWithClobberPrompt({
       projectId: active.id,
@@ -988,6 +999,9 @@ async function openWorktreeRow(branch, shouldCreate, base = '') {
       base,
       toolId,
     });
+    if (res.worktreeTools) {
+      active.worktreeTools = res.worktreeTools;
+    }
     appendLog(t('logExec', { cmd: res.command }), res.stdout || res.stderr || t('openedFallback'));
     showToast(t('openedWorktreeToast', { branch }), 'success');
     await Promise.all([
@@ -2094,7 +2108,6 @@ function bindEvents() {
   $('input-create').addEventListener('change', updateCommandPreview);
   $('select-tool').addEventListener('change', () => {
     updateCommandPreview();
-    renderWorktrees();
   });
 
   $('btn-random-branch').addEventListener('click', () => {
@@ -2114,13 +2127,20 @@ function bindEvents() {
     const btn = $('btn-switch-submit');
     btn.disabled = true;
     try {
+      const targetBranch = $('input-branch').value.trim();
+      const selectedToolId = $('select-tool').value;
       const res = await switchWorktreeWithClobberPrompt({
         projectId: active.id,
-        branch: $('input-branch').value.trim(),
+        branch: targetBranch,
         create: $('input-create').checked,
         base: $('input-base').value.trim(),
-        toolId: $('select-tool').value,
+        toolId: selectedToolId,
       });
+      if (res.worktreeTools) {
+        active.worktreeTools = res.worktreeTools;
+      } else if (targetBranch && selectedToolId) {
+        active.worktreeTools = { ...(active.worktreeTools || {}), [targetBranch]: selectedToolId };
+      }
       appendLog(t('logExec', { cmd: res.command }), res.stdout || res.stderr || t('worktreePathLog', { path: res.worktreePath }));
       showToast(t('worktreeReadyToast'), 'success');
       applyAutoBranchName($('input-base').value.trim(), true);
