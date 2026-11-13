@@ -1,5 +1,8 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
 import { formatCommand, parseWtJson, runWt } from './wt-resolver.js';
 
 export const BUILTIN_TOOLS = [
@@ -218,116 +221,168 @@ export function buildDisplaySwitchCommand({ branch, create, base, tool, prompt }
 }
 
 /**
- * Quote an argument for Windows cmd.exe.
+ * Quote an argument for a line inside a Windows batch (.cmd) file.
+ * Metacharacters are neutralised by double quotes; `%` is doubled because batch
+ * files expand `%VAR%` even inside quotes. Newlines are not allowed in one command.
  * @param {string} arg
  */
-function quoteCmdArg(arg) {
-  if (!arg) return '""';
-  if (/[\s"&|<>^()%]/.test(arg)) {
-    return `"${arg.replace(/"/g, '""')}"`;
+export function quoteCmdArg(arg) {
+  let s = String(arg ?? '').replace(/[\r\n]+/g, ' ');
+  s = s.replace(/%/g, '%%');
+  if (!s) return '""';
+  if (/[\s"&|<>^(),;=!%]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
   }
-  return arg;
+  return s;
 }
 
 /**
  * Quote an argument safely for POSIX shells (macOS / Linux).
  */
-function quotePosixArg(arg) {
+export function quotePosixArg(arg) {
   const s = String(arg ?? '');
   if (s.length > 0 && /^[A-Za-z0-9_./:@%+=,-]+$/.test(s)) return s;
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
- * Pick an available terminal emulator on Linux.
+ * Spawn a detached process without ever crashing the server: a missing binary
+ * emits an async 'error' event which would otherwise be unhandled.
+ * @returns {Promise<{ ok: boolean, error?: string }>}
  */
-function findLinuxTerminal() {
-  const candidates = [
-    { bin: 'x-terminal-emulator', argsPrefix: ['-e'] },
-    { bin: 'gnome-terminal', argsPrefix: ['--'] },
-    { bin: 'konsole', argsPrefix: ['-e'] },
-    { bin: 'xfce4-terminal', argsPrefix: ['-e'] },
-    { bin: 'kitty', argsPrefix: [] },
-    { bin: 'alacritty', argsPrefix: ['-e'] },
-    { bin: 'xterm', argsPrefix: ['-e'] },
-  ];
-  const pathDirs = (process.env.PATH || '').split(':').filter(Boolean);
-  for (const cand of candidates) {
-    if (pathDirs.some((dir) => existsSync(`${dir}/${cand.bin}`))) {
-      return cand;
+export function spawnDetached(command, args, options = {}) {
+  return new Promise((resolvePromise) => {
+    let child;
+    try {
+      child = spawn(command, args, { detached: true, stdio: 'ignore', ...options });
+    } catch (err) {
+      resolvePromise({ ok: false, error: err?.message || String(err) });
+      return;
     }
+    child.once('error', (err) => {
+      resolvePromise({ ok: false, error: `${command}: ${err?.message || String(err)}` });
+    });
+    child.once('spawn', () => {
+      child.unref();
+      resolvePromise({ ok: true });
+    });
+  });
+}
+
+function isOnPath(bin) {
+  const pathDirs = (process.env.PATH || '').split(delimiter).filter(Boolean);
+  return pathDirs.some((dir) => existsSync(join(dir, bin)));
+}
+
+/**
+ * Linux terminal emulators and how each expects an argv vector to be passed.
+ */
+const LINUX_TERMINALS = [
+  { bin: 'gnome-terminal', build: (argv) => ['--', ...argv] },
+  { bin: 'konsole', build: (argv) => ['-e', ...argv] },
+  { bin: 'xfce4-terminal', build: (argv) => ['-x', ...argv] },
+  { bin: 'mate-terminal', build: (argv) => ['-x', ...argv] },
+  { bin: 'tilix', build: (argv) => ['-e', argv.map(quotePosixArg).join(' ')] },
+  { bin: 'kitty', build: (argv) => [...argv] },
+  { bin: 'alacritty', build: (argv) => ['-e', ...argv] },
+  { bin: 'wezterm', build: (argv) => ['start', '--', ...argv] },
+  { bin: 'foot', build: (argv) => [...argv] },
+  { bin: 'x-terminal-emulator', build: (argv) => ['-e', ...argv] },
+  { bin: 'xterm', build: (argv) => ['-e', ...argv] },
+];
+
+/**
+ * Pick an available terminal emulator on Linux, or null when none is installed.
+ */
+export function findLinuxTerminal() {
+  return LINUX_TERMINALS.find((t) => isOnPath(t.bin)) || null;
+}
+
+/**
+ * Build the argv (without terminal wrapper) for the command to run in the new terminal.
+ */
+function buildLaunchArgv({ wtBin, repoPath, branch, tool, extraArgs }) {
+  if (wtBin && repoPath && branch) {
+    return [wtBin, '-C', repoPath, 'switch', branch, '-y', '-x', tool.command, ...(extraArgs.length ? ['--', ...extraArgs] : [])];
   }
-  return candidates[0];
+  return [tool.command, ...extraArgs];
+}
+
+function launchScriptDir() {
+  const dir = join(tmpdir(), 'wt-ui-launch');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 /**
  * Spawn an interactive CLI tool inside a new terminal window at `worktreePath`.
  * If `wtBin` and `repoPath` and `branch` are provided, runs `wt -C <repoPath> switch <branch> -x <cmd>`
  * so Worktrunk hooks and environment are preserved.
+ * @returns {Promise<{ ok: boolean, error?: string }>}
  */
-export function spawnInNewTerminal({ wtBin, repoPath, branch, tool, prompt, worktreePath }) {
+export async function spawnInNewTerminal({ wtBin, repoPath, branch, tool, prompt, worktreePath }) {
   const extraArgs = [...(tool.args || [])];
   if (prompt && tool.supportsPrompt) {
     extraArgs.push(prompt);
   }
+  const cwd = worktreePath && existsSync(worktreePath) ? worktreePath : repoPath;
+  const argv = tool.id === 'terminal' ? null : buildLaunchArgv({ wtBin, repoPath, branch, tool, extraArgs });
 
   if (process.platform === 'win32') {
-    let innerCommand;
-    if (tool.id === 'terminal') {
-      innerCommand = `cd /d ${quoteCmdArg(worktreePath)}`;
-    } else if (wtBin && repoPath && branch) {
-      const wtArgs = ['-C', repoPath, 'switch', branch, '-y', '-x', tool.command];
-      if (extraArgs.length > 0) {
-        wtArgs.push('--', ...extraArgs);
-      }
-      innerCommand = [quoteCmdArg(wtBin), ...wtArgs.map(quoteCmdArg)].join(' ');
-    } else {
-      innerCommand = [quoteCmdArg(tool.command), ...extraArgs.map(quoteCmdArg)].join(' ');
-    }
+    // Write a temporary .cmd script instead of nesting quotes through two cmd.exe
+    // parsers; this stays correct for paths with spaces, CJK characters and
+    // prompts containing & | % ^ " etc.
+    const lines = ['@echo off', 'chcp 65001 >nul'];
+    if (cwd) lines.push(`cd /d ${quoteCmdArg(cwd)}`);
+    if (argv) lines.push(argv.map(quoteCmdArg).join(' '));
+    lines.push('(goto) 2>nul & del "%~f0"');
+    const scriptPath = join(launchScriptDir(), `launch-${randomUUID().slice(0, 8)}.cmd`);
+    writeFileSync(scriptPath, `${lines.join('\r\n')}\r\n`, 'utf8');
 
-    const title = `wt-ui: ${branch || tool.name}`;
-    const child = spawn('cmd.exe', ['/c', 'start', title, 'cmd.exe', '/k', innerCommand], {
-      cwd: worktreePath && existsSync(worktreePath) ? worktreePath : repoPath,
-      detached: true,
-      stdio: 'ignore',
+    const title = `wt-ui ${branch || tool.name}`.replace(/["%^&|<>]/g, '');
+    // /s strips only the outermost quotes, leaving the inner command line verbatim.
+    const cmdLine = `/d /s /c "start "${title}" cmd.exe /k "${scriptPath}""`;
+    return spawnDetached('cmd.exe', [cmdLine], {
+      cwd: cwd || undefined,
+      windowsVerbatimArguments: true,
       windowsHide: false,
     });
-    child.unref();
-    return;
   }
 
+  const shellLine = [
+    cwd ? `cd ${quotePosixArg(cwd)}` : null,
+    argv ? argv.map(quotePosixArg).join(' ') : null,
+  ]
+    .filter(Boolean)
+    .join(' && ');
+
   if (process.platform === 'darwin') {
-    const shellLine =
-      tool.id === 'terminal'
-        ? `cd ${quotePosixArg(worktreePath)}`
-        : wtBin && repoPath && branch
-          ? [wtBin, '-C', repoPath, 'switch', branch, '-y', '-x', tool.command, ...(extraArgs.length ? ['--', ...extraArgs] : [])]
-              .map(quotePosixArg)
-              .join(' ')
-          : [tool.command, ...extraArgs].map(quotePosixArg).join(' ');
-    const script = `tell application "Terminal" to do script ${JSON.stringify(shellLine)}`;
-    const child = spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' });
-    child.unref();
-    return;
+    // AppleScript string literal: escape backslashes and quotes; drop control chars.
+    const asString = `"${shellLine.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+    return spawnDetached('osascript', [
+      '-e',
+      'tell application "Terminal"',
+      '-e',
+      'activate',
+      '-e',
+      `do script ${asString}`,
+      '-e',
+      'end tell',
+    ]);
   }
 
   // Linux
-  const term = findLinuxTerminal();
-  const cwd = worktreePath && existsSync(worktreePath) ? worktreePath : repoPath;
-  let cmdArgs;
-  if (tool.id === 'terminal') {
-    cmdArgs = [process.env.SHELL || 'bash'];
-  } else if (wtBin && repoPath && branch) {
-    cmdArgs = [wtBin, '-C', repoPath, 'switch', branch, '-y', '-x', tool.command, ...(extraArgs.length ? ['--', ...extraArgs] : [])];
-  } else {
-    cmdArgs = [tool.command, ...extraArgs];
+  if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    return { ok: false, error: '未检测到图形桌面 (DISPLAY / WAYLAND_DISPLAY)，无法打开新终端窗口' };
   }
-  const child = spawn(term.bin, [...term.argsPrefix, ...cmdArgs], {
-    cwd,
-    detached: true,
-    stdio: 'ignore',
-  });
-  child.unref();
+  const term = findLinuxTerminal();
+  if (!term) {
+    return { ok: false, error: '未找到可用的终端模拟器 (gnome-terminal / konsole / xfce4-terminal / kitty / alacritty / xterm ...)' };
+  }
+  // Keep the window open with an interactive shell after the tool exits.
+  const userShell = process.env.SHELL || '/bin/sh';
+  const wrapped = ['sh', '-c', `${shellLine || ':'}; exec ${quotePosixArg(userShell)}`];
+  return spawnDetached(term.bin, term.build(wrapped), { cwd: cwd || undefined });
 }
 
 /**
@@ -385,8 +440,9 @@ export async function switchAndOpenWorktree({
   const worktreePath = json?.path || json?.worktree?.path || repoPath;
 
   // For CLI tools, spawn a new interactive terminal window in the worktree.
+  let launch = null;
   if (tool && tool.kind === 'cli' && tool.command) {
-    spawnInNewTerminal({
+    launch = await spawnInNewTerminal({
       wtBin,
       repoPath,
       branch,
@@ -401,34 +457,35 @@ export async function switchAndOpenWorktree({
     command: displayCommand,
     executedCommand: result.command,
     stdout: result.stdout,
-    stderr: result.stderr,
+    stderr: launch && !launch.ok ? [result.stderr, `⚠ 无法打开终端: ${launch.error}`].filter(Boolean).join('\n') : result.stderr,
     data: json,
     worktreePath,
+    launch,
   };
 }
 
 /**
  * Open the browser to a local URL across Windows, macOS, and Linux.
+ * Never throws; resolves to `{ ok, error? }`.
  * @param {string} url
  */
-export function openBrowser(url) {
-  try {
-    if (process.platform === 'win32') {
-      const child = spawn('cmd.exe', ['/c', 'start', '', url], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      child.unref();
-    } else if (process.platform === 'darwin') {
-      const child = spawn('open', [url], { detached: true, stdio: 'ignore' });
-      child.unref();
-    } else {
-      const child = spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
-      child.unref();
-    }
-  } catch {
-    // Non-fatal if browser cannot be opened automatically
+export async function openBrowser(url) {
+  if (process.platform === 'win32') {
+    // `start` treats the first quoted argument as the window title, hence the empty "".
+    return spawnDetached('cmd.exe', ['/d', '/c', 'start', '""', url.replace(/&/g, '^&')], {
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    });
   }
+  if (process.platform === 'darwin') {
+    return spawnDetached('open', [url]);
+  }
+  for (const opener of ['xdg-open', 'gio', 'sensible-browser', 'wslview']) {
+    if (!isOnPath(opener)) continue;
+    const args = opener === 'gio' ? ['open', url] : [url];
+    const res = await spawnDetached(opener, args);
+    if (res.ok) return res;
+  }
+  return { ok: false, error: '未找到可用的浏览器打开命令 (xdg-open / gio / wslview)' };
 }
 

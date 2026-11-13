@@ -1,9 +1,11 @@
 import { createServer } from 'node:http';
-import { existsSync, readFileSync } from 'node:fs';
-import { extname, join, resolve } from 'node:path';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { isIP } from 'node:net';
+import { hostname as osHostname } from 'node:os';
+import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { checkEnvironment, parseWtJson, runWt } from './wt-resolver.js';
+import { checkEnvironment, invalidateEnvironmentCache, parseWtJson, runWt } from './wt-resolver.js';
 import { autoInstallWorktrunk } from './wt-installer.js';
 import { browsePath, inspectGitRepo, parseCodeWorkspace, pickNativePath } from './workspace.js';
 import {
@@ -39,18 +41,94 @@ function sendJson(res, statusCode, payload) {
 
 async function readJsonBody(req) {
   const chunks = [];
+  let size = 0;
   for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 1024 * 1024) {
+      throw new HttpError(413, 'Request body too large');
+    }
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString('utf8').trim();
   if (!raw) return {};
-  return JSON.parse(raw);
+  // Requiring application/json forces cross-origin requests through a CORS preflight,
+  // which this server never approves.
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  if (!contentType.startsWith('application/json')) {
+    throw new HttpError(415, 'Content-Type must be application/json');
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new HttpError(400, 'Invalid JSON body');
+  }
+}
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function isAllowedHostname(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return false;
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (isIP(h)) return true; // DNS rebinding needs a domain name, IP literals are safe
+  return h === hostname_().toLowerCase();
+}
+
+function hostname_() {
+  try {
+    return osHostname();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Reject requests that could come from a malicious web page:
+ * - Host header must be localhost / an IP literal / this machine (blocks DNS rebinding)
+ * - Origin, when present, must match the Host (blocks cross-site requests)
+ */
+function checkRequestOrigin(req) {
+  const hostHeader = req.headers.host || '';
+  let hostUrl;
+  try {
+    hostUrl = new URL(`http://${hostHeader}`);
+  } catch {
+    return false;
+  }
+  if (!isAllowedHostname(hostUrl.hostname)) return false;
+  const origin = req.headers.origin;
+  if (origin && origin !== 'null') {
+    try {
+      const o = new URL(origin);
+      if (o.host.toLowerCase() !== hostUrl.host.toLowerCase()) return false;
+    } catch {
+      return false;
+    }
+  } else if (origin === 'null') {
+    return false;
+  }
+  const fetchSite = req.headers['sec-fetch-site'];
+  if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') return false;
+  return true;
 }
 
 function serveStatic(reqPath, res) {
   const cleanPath = reqPath === '/' ? '/index.html' : reqPath;
-  const target = resolve(PUBLIC_DIR, `.${cleanPath}`);
-  if (!target.startsWith(PUBLIC_DIR) || !existsSync(target)) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(cleanPath);
+  } catch {
+    sendJson(res, 400, { error: 'Bad path' });
+    return;
+  }
+  const target = resolve(PUBLIC_DIR, `.${decoded}`);
+  const inside = target === PUBLIC_DIR || target.startsWith(PUBLIC_DIR + sep);
+  if (!inside || !existsSync(target) || !statSync(target).isFile()) {
     sendJson(res, 404, { error: 'Not found' });
     return;
   }
@@ -71,6 +149,11 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         return;
       }
 
+      if (!checkRequestOrigin(req)) {
+        sendJson(res, 403, { error: 'Forbidden: cross-origin or untrusted Host header' });
+        return;
+      }
+
       if (req.method === 'GET' && pathname === '/api/health') {
         const env = await checkEnvironment({ wtBin: explicitWtBin });
         sendJson(res, 200, env);
@@ -79,7 +162,8 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
 
       if (req.method === 'POST' && pathname === '/api/wt/install') {
         const installResult = await autoInstallWorktrunk();
-        const env = await checkEnvironment({ wtBin: explicitWtBin });
+        invalidateEnvironmentCache();
+        const env = await checkEnvironment({ wtBin: explicitWtBin, fresh: true });
         sendJson(res, installResult.ok ? 200 : 500, { installResult, env });
         return;
       }
@@ -394,7 +478,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
 
       sendJson(res, 404, { error: `Unknown API route: ${req.method} ${pathname}` });
     } catch (err) {
-      sendJson(res, 500, { error: err?.message || String(err) });
+      sendJson(res, err instanceof HttpError ? err.status : 500, { error: err?.message || String(err) });
     }
   });
 

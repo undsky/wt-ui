@@ -162,7 +162,7 @@ async function main() {
       onLog: (msg) => console.log(`  ${msg}`),
     });
     if (installRes.ok) {
-      env = await checkEnvironment({ wtBin: flags.wtBin });
+      env = await checkEnvironment({ wtBin: flags.wtBin, fresh: true });
     } else {
       console.warn(`⚠ 自动安装未成功: ${installRes.error}`);
     }
@@ -173,7 +173,9 @@ async function main() {
 
   const server = createAppServer({ wtBin: flags.wtBin });
   const actualPort = await listenWithFallback(server, host, preferredPort, !hasExplicitPort);
-  const url = `http://${host}:${actualPort}`;
+  // Wildcard listen addresses are not browsable (especially on Windows).
+  const browseHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host;
+  const url = `http://${browseHost}:${actualPort}`;
 
   console.log(`\nwt-ui v${pkg.version} 已启动: ${url}`);
   if (env.wtBin) {
@@ -187,7 +189,10 @@ async function main() {
   console.log('按 Ctrl+C 停止服务\n');
 
   if (!flags.noOpen) {
-    openBrowser(url);
+    const opened = await openBrowser(url);
+    if (!opened.ok) {
+      console.log(`⚠ 无法自动打开浏览器 (${opened.error})，请手动访问: ${url}`);
+    }
   }
 }
 

@@ -100,6 +100,8 @@ async function collectWtCandidates(explicitBin) {
   if (process.platform === 'win32') {
     const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
     const wingetRoot = join(localAppData, 'Microsoft', 'WinGet', 'Packages');
+    const wingetLink = join(localAppData, 'Microsoft', 'WinGet', 'Links', 'wt.exe');
+    if (existsSync(wingetLink)) add(wingetLink);
     if (existsSync(wingetRoot)) {
       try {
         for (const entry of readdirSync(wingetRoot)) {
@@ -171,11 +173,41 @@ export function getInstallGuide(platform = process.platform) {
   };
 }
 
+const ENV_CACHE_TTL_MS = 10_000;
+const envCache = new Map();
+
+/**
+ * Drop cached environment results (e.g. after installing Worktrunk).
+ */
+export function invalidateEnvironmentCache() {
+  envCache.clear();
+}
+
 /**
  * Resolve Worktrunk binary and check environment health (git version, wt version).
- * @param {{ wtBin?: string }} [options]
+ * Results are cached briefly because every API call needs them and probing spawns
+ * several processes (slow on Windows).
+ * @param {{ wtBin?: string, fresh?: boolean }} [options]
  */
 export async function checkEnvironment(options = {}) {
+  const key = options.wtBin || '';
+  const cached = envCache.get(key);
+  if (!options.fresh && cached && Date.now() - cached.at < ENV_CACHE_TTL_MS) {
+    return cached.promise;
+  }
+  const promise = checkEnvironmentUncached(options);
+  envCache.set(key, { at: Date.now(), promise });
+  promise.then(
+    (env) => {
+      // Do not keep negative results around: the user may be installing wt right now.
+      if (!env.ok) envCache.delete(key);
+    },
+    () => envCache.delete(key)
+  );
+  return promise;
+}
+
+async function checkEnvironmentUncached(options = {}) {
   const candidates = await collectWtCandidates(options.wtBin);
   let resolvedWt = null;
   let wtVersion = null;

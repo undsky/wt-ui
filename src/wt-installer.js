@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
@@ -19,7 +20,8 @@ const execFileAsync = promisify(execFile);
 export const CHINA_GITHUB_MIRRORS = [
   'https://gh-proxy.com/',
   'https://ghfast.top/',
-  'https://mirror.ghproxy.com/',
+  'https://ghproxy.net/',
+  'https://gh-proxy.org/',
   '', // direct GitHub fallback
 ];
 
@@ -33,18 +35,27 @@ export function getManagedWtBinPath(platform = process.platform) {
 
 export function getReleaseAssetName(platform = process.platform, arch = process.arch) {
   if (platform === 'win32') {
-    return arch === 'arm64'
-      ? 'worktrunk-aarch64-pc-windows-msvc.zip'
-      : 'worktrunk-x86_64-pc-windows-msvc.zip';
+    // Upstream only ships x64 for Windows; Windows 11 on ARM runs it via emulation.
+    return 'worktrunk-x86_64-pc-windows-msvc.zip';
   }
   if (platform === 'darwin') {
     return arch === 'arm64'
       ? 'worktrunk-aarch64-apple-darwin.tar.xz'
       : 'worktrunk-x86_64-apple-darwin.tar.xz';
   }
+  // Linux builds are statically linked against musl (works on glibc distros and Alpine).
   return arch === 'arm64'
-    ? 'worktrunk-aarch64-unknown-linux-gnu.tar.xz'
-    : 'worktrunk-x86_64-unknown-linux-gnu.tar.xz';
+    ? 'worktrunk-aarch64-unknown-linux-musl.tar.xz'
+    : 'worktrunk-x86_64-unknown-linux-musl.tar.xz';
+}
+
+/**
+ * Parse a `*.sha256` / `sha256sum` style file and return the hex digest.
+ * @param {string} text
+ */
+export function parseSha256File(text) {
+  const match = String(text || '').match(/\b([a-fA-F0-9]{64})\b/);
+  return match ? match[1].toLowerCase() : null;
 }
 
 function findBinaryRecursive(dir, targetName) {
@@ -62,9 +73,18 @@ function findBinaryRecursive(dir, targetName) {
   return null;
 }
 
-async function downloadWithTimeout(url, timeoutMs = 45_000) {
+/**
+ * Download a URL into memory. Uses a connect timeout plus an idle (stall) timeout
+ * instead of a hard total timeout, so slow-but-progressing mirrors still succeed.
+ */
+async function downloadWithTimeout(url, { minBytes = 1024, idleTimeoutMs = 30_000, maxTotalMs = 600_000 } = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let idleTimer = setTimeout(() => controller.abort(new Error('连接超时')), idleTimeoutMs);
+  const totalTimer = setTimeout(() => controller.abort(new Error('下载总时长超时')), maxTotalMs);
+  const resetIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => controller.abort(new Error('下载停滞超时')), idleTimeoutMs);
+  };
   try {
     const res = await fetch(url, {
       redirect: 'follow',
@@ -74,13 +94,77 @@ async function downloadWithTimeout(url, timeoutMs = 45_000) {
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length < 1024) {
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of res.body) {
+      chunks.push(chunk);
+      total += chunk.length;
+      resetIdle();
+    }
+    const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)), total);
+    if (buf.length < minBytes) {
       throw new Error('Downloaded file is unexpectedly small');
     }
     return buf;
+  } catch (err) {
+    if (controller.signal.aborted && controller.signal.reason instanceof Error) {
+      throw controller.signal.reason;
+    }
+    throw err;
   } finally {
-    clearTimeout(timer);
+    clearTimeout(idleTimer);
+    clearTimeout(totalTimer);
+  }
+}
+
+/**
+ * Fetch the published sha256 digest for an asset, trying the same mirror first,
+ * then the remaining mirrors.
+ */
+async function fetchExpectedSha256(githubUrl, preferredMirror) {
+  const ordered = [preferredMirror, ...CHINA_GITHUB_MIRRORS.filter((m) => m !== preferredMirror)];
+  for (const mirror of ordered) {
+    const url = mirror ? `${mirror}${githubUrl}.sha256` : `${githubUrl}.sha256`;
+    try {
+      const buf = await downloadWithTimeout(url, { minBytes: 64, idleTimeoutMs: 15_000, maxTotalMs: 30_000 });
+      const digest = parseSha256File(buf.toString('utf8'));
+      if (digest) return digest;
+    } catch {
+      // try next mirror
+    }
+  }
+  return null;
+}
+
+async function extractArchive(archivePath, extractDir) {
+  if (archivePath.endsWith('.zip')) {
+    const ps = (s) => s.replace(/'/g, "''");
+    try {
+      await execFileAsync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `$ProgressPreference='SilentlyContinue'; Expand-Archive -LiteralPath '${ps(archivePath)}' -DestinationPath '${ps(extractDir)}' -Force`,
+        ],
+        { timeout: 60_000, windowsHide: true }
+      );
+      return;
+    } catch (err) {
+      // Fallback: bsdtar ships with Windows 10 1803+ and can read zip files.
+      try {
+        await execFileAsync('tar.exe', ['-xf', archivePath, '-C', extractDir], { timeout: 60_000, windowsHide: true });
+        return;
+      } catch {
+        throw err;
+      }
+    }
+  }
+  try {
+    await execFileAsync('tar', ['-xJf', archivePath, '-C', extractDir], { timeout: 60_000 });
+  } catch (err) {
+    throw new Error(`解压失败（请确认系统已安装 tar 与 xz）: ${err.message}`);
   }
 }
 
@@ -97,14 +181,27 @@ async function installViaMirrorBinary(onLog) {
     let usedMirror = null;
 
     for (const mirror of CHINA_GITHUB_MIRRORS) {
+      const label = mirror || 'github.com';
       const url = mirror ? `${mirror}${githubUrl}` : githubUrl;
       onLog?.(`尝试从镜像下载 Worktrunk: ${mirror || 'github.com (直连)'}`);
       try {
-        downloaded = await downloadWithTimeout(url);
-        usedMirror = mirror || 'github.com';
+        const buf = await downloadWithTimeout(url);
+        const expected = await fetchExpectedSha256(githubUrl, mirror);
+        const actual = createHash('sha256').update(buf).digest('hex');
+        if (expected && expected !== actual) {
+          onLog?.(`✗ 校验失败 (${label}): sha256 不匹配，已丢弃`);
+          continue;
+        }
+        if (!expected) {
+          onLog?.(`⚠ 无法获取 sha256 校验文件，跳过完整性校验 (${label})`);
+        } else {
+          onLog?.(`✓ sha256 校验通过`);
+        }
+        downloaded = buf;
+        usedMirror = label;
         break;
       } catch (err) {
-        onLog?.(`镜像不可用 (${mirror || 'github.com'}): ${err.message}`);
+        onLog?.(`镜像不可用 (${label}): ${err.message}`);
       }
     }
 
@@ -113,19 +210,7 @@ async function installViaMirrorBinary(onLog) {
     }
 
     writeFileSync(archivePath, downloaded);
-
-    if (asset.endsWith('.zip')) {
-      await execFileAsync(
-        'powershell.exe',
-        ['-NoProfile', '-Command', `Expand-Archive -Path '${archivePath.replace(/'/g, "''")}' -DestinationPath '${extractDir.replace(/'/g, "''")}' -Force`],
-        { timeout: 30_000, windowsHide: true }
-      );
-    } else {
-      await execFileAsync('tar', ['-xf', archivePath, '-C', extractDir], {
-        timeout: 30_000,
-        windowsHide: true,
-      });
-    }
+    await extractArchive(archivePath, extractDir);
 
     const binName = process.platform === 'win32' ? 'wt.exe' : 'wt';
     const foundBin = findBinaryRecursive(extractDir, binName);
@@ -159,16 +244,13 @@ async function installViaCargoChinaMirror(onLog) {
     return { ok: false, method: 'cargo-ustc', error: '未安装 cargo' };
   }
 
-  onLog?.('尝试使用中科大 Cargo 国内源安装 worktrunk...');
+  onLog?.('尝试使用中科大 Cargo 国内源编译安装 worktrunk（可能需要数分钟）...');
   try {
-    await execFileAsync('cargo', ['install', 'worktrunk', '--locked'], {
-      timeout: 300_000,
+    // crates-io's index cannot be overridden directly; source replacement is required.
+    await execFileAsync('cargo', [...getCargoMirrorArgs(), 'install', 'worktrunk', '--locked'], {
+      timeout: 1_200_000,
+      maxBuffer: 50 * 1024 * 1024,
       windowsHide: true,
-      env: {
-        ...process.env,
-        CARGO_REGISTRIES_CRATES_IO_PROTOCOL: 'sparse',
-        CARGO_REGISTRIES_CRATES_IO_INDEX: 'sparse+https://mirrors.ustc.edu.cn/crates.io-index/',
-      },
     });
     return { ok: true, method: 'cargo-ustc', mirror: 'mirrors.ustc.edu.cn' };
   } catch (err) {
@@ -176,14 +258,41 @@ async function installViaCargoChinaMirror(onLog) {
   }
 }
 
+/**
+ * Cargo `--config` args that redirect crates.io to the USTC sparse mirror.
+ */
+export function getCargoMirrorArgs() {
+  return [
+    '--config',
+    "source.crates-io.replace-with='ustc'",
+    '--config',
+    "source.ustc.registry='sparse+https://mirrors.ustc.edu.cn/crates.io-index/'",
+  ];
+}
+
 async function installViaPackageManager(onLog) {
   if (process.platform === 'win32') {
-    onLog?.('尝试使用 winget 安装 max-sixty.worktrunk...');
+    try {
+      await execFileAsync('winget', ['--version'], { timeout: 5000, windowsHide: true });
+    } catch {
+      return { ok: false, method: 'winget', error: '未安装 winget' };
+    }
+    onLog?.('尝试使用 winget 安装 max-sixty.worktrunk（下载源为 GitHub，国内可能较慢）...');
     try {
       await execFileAsync(
         'winget',
-        ['install', '--id', 'max-sixty.worktrunk', '--silent', '--accept-package-agreements', '--accept-source-agreements'],
-        { timeout: 180_000, windowsHide: true }
+        [
+          'install',
+          '--id',
+          'max-sixty.worktrunk',
+          '--exact',
+          '--source',
+          'winget',
+          '--silent',
+          '--accept-package-agreements',
+          '--accept-source-agreements',
+        ],
+        { timeout: 300_000, windowsHide: true, maxBuffer: 10 * 1024 * 1024 }
       );
       return { ok: true, method: 'winget', mirror: 'winget' };
     } catch (err) {
@@ -192,7 +301,7 @@ async function installViaPackageManager(onLog) {
   }
 
   try {
-    await execFileAsync('brew', ['--version'], { timeout: 3000, windowsHide: true });
+    await execFileAsync('brew', ['--version'], { timeout: 5000 });
   } catch {
     return { ok: false, method: 'brew-ustc', error: '未安装 Homebrew' };
   }
@@ -200,13 +309,16 @@ async function installViaPackageManager(onLog) {
   onLog?.('尝试使用中科大 Homebrew 国内源安装 worktrunk...');
   try {
     await execFileAsync('brew', ['install', 'worktrunk'], {
-      timeout: 240_000,
-      windowsHide: true,
+      timeout: 600_000,
+      maxBuffer: 10 * 1024 * 1024,
       env: {
         ...process.env,
+        HOMEBREW_NO_AUTO_UPDATE: '1',
+        HOMEBREW_NO_INSTALL_CLEANUP: '1',
         HOMEBREW_API_DOMAIN: 'https://mirrors.ustc.edu.cn/homebrew-bottles/api',
         HOMEBREW_BOTTLE_DOMAIN: 'https://mirrors.ustc.edu.cn/homebrew-bottles',
         HOMEBREW_BREW_GIT_REMOTE: 'https://mirrors.ustc.edu.cn/brew.git',
+        HOMEBREW_CORE_GIT_REMOTE: 'https://mirrors.ustc.edu.cn/homebrew-core.git',
       },
     });
     return { ok: true, method: 'brew-ustc', mirror: 'mirrors.ustc.edu.cn' };
@@ -215,11 +327,25 @@ async function installViaPackageManager(onLog) {
   }
 }
 
+let inflightInstall = null;
+
 /**
  * Automatically install Worktrunk using domestic (China) mirrors.
+ * Concurrent callers share the same in-flight installation.
  * @param {{ onLog?: (msg: string) => void }} [options]
  */
-export async function autoInstallWorktrunk(options = {}) {
+export function autoInstallWorktrunk(options = {}) {
+  if (inflightInstall) {
+    options.onLog?.('已有安装任务正在进行，等待其完成...');
+    return inflightInstall;
+  }
+  inflightInstall = runInstallStrategies(options).finally(() => {
+    inflightInstall = null;
+  });
+  return inflightInstall;
+}
+
+async function runInstallStrategies(options) {
   const logs = [];
   const log = (msg) => {
     logs.push(msg);
@@ -228,10 +354,16 @@ export async function autoInstallWorktrunk(options = {}) {
 
   const strategies = [installViaMirrorBinary, installViaCargoChinaMirror, installViaPackageManager];
   for (const strategy of strategies) {
-    const res = await strategy(log);
+    let res;
+    try {
+      res = await strategy(log);
+    } catch (err) {
+      res = { ok: false, method: strategy.name, error: err?.message || String(err) };
+    }
     if (res.ok) {
       return { ...res, logs };
     }
+    log(`✗ ${res.method} 失败: ${res.error}`);
   }
 
   return {

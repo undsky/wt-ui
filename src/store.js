@@ -3,6 +3,17 @@ import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+/**
+ * Compare filesystem paths. Windows and macOS (default APFS) are case-insensitive;
+ * Linux is case-sensitive.
+ */
+export function samePath(a, b, platform = process.platform) {
+  if (platform === 'win32' || platform === 'darwin') {
+    return String(a).toLowerCase() === String(b).toLowerCase();
+  }
+  return a === b;
+}
+
 export function getStoreDir() {
   return process.env.WT_UI_HOME ? resolve(process.env.WT_UI_HOME) : join(homedir(), '.wt-ui');
 }
@@ -50,7 +61,7 @@ export function saveStore(store) {
 
 export function addStandaloneProject(store, { name, path, defaultToolId }) {
   const absPath = resolve(path);
-  const existing = store.projects.find((p) => p.path.toLowerCase() === absPath.toLowerCase());
+  const existing = store.projects.find((p) => samePath(p.path, absPath));
   if (existing) {
     if (name) existing.name = name;
     if (defaultToolId !== undefined) existing.defaultToolId = defaultToolId;
@@ -72,7 +83,7 @@ export function addStandaloneProject(store, { name, path, defaultToolId }) {
 
 export function importWorkspaceProjects(store, workspaceData) {
   const absWsFile = resolve(workspaceData.workspaceFile);
-  let ws = store.workspaces.find((w) => w.workspaceFile.toLowerCase() === absWsFile.toLowerCase());
+  let ws = store.workspaces.find((w) => samePath(w.workspaceFile, absWsFile));
   if (!ws) {
     ws = {
       id: `ws_${randomUUID().slice(0, 8)}`,
@@ -89,7 +100,7 @@ export function importWorkspaceProjects(store, workspaceData) {
   for (const item of workspaceData.projects) {
     if (!item.isGitRepo) continue;
     const absPath = resolve(item.gitRoot || item.path);
-    let proj = store.projects.find((p) => p.path.toLowerCase() === absPath.toLowerCase());
+    let proj = store.projects.find((p) => samePath(p.path, absPath));
     if (!proj) {
       proj = {
         id: `proj_${randomUUID().slice(0, 8)}`,
