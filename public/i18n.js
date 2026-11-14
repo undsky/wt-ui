@@ -282,6 +282,17 @@ export const MESSAGES = {
     pushSuccessToast: '分支 {branch} 已推送到远程',
     pushFailLog: '推送失败: {cmd}',
     pushFailToast: '推送失败: {msg}',
+    pushRejectedTitle: '推送被拒绝 (non-fast-forward)',
+    pushRejectedBranchLabel: '分支：',
+    pushRejectedMessage: '远端分支与本地分支提交历史已分叉（或远端有未拉取的新提交），Git 拒绝直接快进推送。请选择处理方式：',
+    pushRejectedPullOptionHtml:
+      '<strong>拉取并推送</strong>：先执行 <code>git pull</code> 合并远端提交后再推送（若产生冲突将打开冲突解决器）。',
+    pushRejectedForceOptionHtml:
+      '<strong>安全强推 (<code>--force-with-lease</code>)</strong>：适用于本地已变基或重写提交历史，用本地分支覆盖远端（若远端存在未拉取的新提交会被安全拦截）。',
+    pushPullAndRetryBtn: '拉取并推送',
+    pushForceLeaseBtn: '安全强推 (--force-with-lease)',
+    pushForceSuccessToast: '分支 {branch} 已通过 --force-with-lease 安全强推到远程',
+    pushPullSuccessToast: '分支 {branch} 已拉取更新并成功推送到远程',
     conflictAutoPushHtml: '提交后自动推送到远程 (<code>git push</code>)',
   },
   en: {
@@ -565,6 +576,18 @@ export const MESSAGES = {
     pushSuccessToast: 'Pushed {branch} to remote',
     pushFailLog: 'Push failed: {cmd}',
     pushFailToast: 'Push failed: {msg}',
+    pushRejectedTitle: 'Push Rejected (non-fast-forward)',
+    pushRejectedBranchLabel: 'Branch:',
+    pushRejectedMessage:
+      'The remote branch has diverged from your local branch (or contains newer commits), so Git rejected a fast-forward push. Choose how to proceed:',
+    pushRejectedPullOptionHtml:
+      '<strong>Pull & Push</strong>: Run <code>git pull</code> to integrate remote changes first, then push (opens the Conflict Resolver if conflicts occur).',
+    pushRejectedForceOptionHtml:
+      '<strong>Force Push (<code>--force-with-lease</code>)</strong>: Overwrite the remote branch after a local rebase or history rewrite (still safely blocked if unseen remote commits exist).',
+    pushPullAndRetryBtn: 'Pull & Push',
+    pushForceLeaseBtn: 'Force Push (--force-with-lease)',
+    pushForceSuccessToast: 'Force-pushed {branch} (--force-with-lease) to remote',
+    pushPullSuccessToast: 'Pulled latest updates and pushed {branch} to remote',
     conflictAutoPushHtml: 'Auto push to remote after commit (<code>git push</code>)',
   },
 };

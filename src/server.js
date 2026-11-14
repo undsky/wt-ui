@@ -613,6 +613,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         let finalStdout = result.stdout;
         let finalStderr = result.stderr;
 
+        let pushFailed = null;
         if (!result.ok) {
           conflictInfo = await detectOrStartLocalConflictSession(project.path, {
             sourceBranch: mergeOptions.branch,
@@ -640,6 +641,16 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
             finalCmd = `${result.command} && ${pushRes.command}`;
             finalStdout = [result.stdout, pushRes.stdout].filter(Boolean).join('\n');
             finalStderr = [result.stderr, pushRes.stderr].filter(Boolean).join('\n');
+            if (!pushRes.ok) {
+              pushFailed = {
+                workDir: pushRes.workDir,
+                branch: pushRes.branch || mergeOptions.target,
+                nonFastForward: Boolean(pushRes.nonFastForward),
+                command: pushRes.command,
+                stdout: pushRes.stdout,
+                stderr: pushRes.stderr,
+              };
+            }
           }
         }
         sendJson(res, finalOk ? 200 : 422, {
@@ -649,6 +660,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           stdout: finalStdout,
           stderr: finalStderr,
           ...conflictInfo,
+          ...(pushFailed ? { pushFailed } : {}),
         });
         return;
       }
@@ -750,6 +762,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         const result = await pullWorktreeBranch(project.path, {
           workDir,
           branch: body.branch ? String(body.branch).trim() : '',
+          autoPush: Boolean(body.autoPush),
         });
         sendJson(res, result.ok ? 200 : 422, result);
         return;
@@ -767,6 +780,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         const result = await pushWorktreeBranch(project.path, {
           workDir,
           branch: body.branch ? String(body.branch).trim() : '',
+          forceWithLease: Boolean(body.forceWithLease),
         });
         sendJson(res, result.ok ? 200 : 422, result);
         return;

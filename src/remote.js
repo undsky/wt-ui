@@ -387,7 +387,7 @@ export async function pullWorktreeBranch(repoPath, options = {}) {
         sourceBranch: sourceBranchLabel,
         targetBranch: currentBranch || 'HEAD',
         operation: conflictStatus.operation || 'merge',
-        autoPush: false,
+        autoPush: Boolean(options.autoPush),
         files: conflictStatus.files,
         unmergedFiles: conflictStatus.unmergedFiles,
       },
@@ -405,9 +405,25 @@ export async function pullWorktreeBranch(repoPath, options = {}) {
 }
 
 /**
+ * Detect whether a git push failure was caused by a non-fast-forward / fetch-first rejection.
+ * @param {string} [stderr]
+ * @param {string} [stdout]
+ * @returns {boolean}
+ */
+export function isNonFastForwardPushError(stderr = '', stdout = '') {
+  const combined = `${stderr || ''}\n${stdout || ''}`;
+  return (
+    /\[rejected\][^\n]*(?:non-fast-forward|fetch first)/i.test(combined) ||
+    /updates were rejected because (?:a pushed branch tip is behind|the tip of your current branch is behind|the remote contains work)/i.test(
+      combined
+    )
+  );
+}
+
+/**
  * Push a local worktree branch to its remote (`git push` or `git push -u <remote> <branch>`).
  * @param {string} repoPath
- * @param {{ workDir?: string, branch?: string }} [options]
+ * @param {{ workDir?: string, branch?: string, forceWithLease?: boolean }} [options]
  */
 export async function pushWorktreeBranch(repoPath, options = {}) {
   const worktrees = await listGitWorktrees(repoPath);
@@ -430,9 +446,12 @@ export async function pushWorktreeBranch(repoPath, options = {}) {
     { timeout: 5_000 }
   );
 
+  const forceWithLease = Boolean(options.forceWithLease);
+  const forceArgs = forceWithLease ? ['--force-with-lease'] : [];
+
   let pushArgs;
   if (upstreamRes.ok && upstreamRes.stdout.trim()) {
-    pushArgs = ['push'];
+    pushArgs = ['push', ...forceArgs];
   } else {
     const remoteRes = await runGit(workDir, ['remote'], { timeout: 5_000 });
     const firstRemote =
@@ -440,9 +459,18 @@ export async function pushWorktreeBranch(repoPath, options = {}) {
         .split(/\r?\n/)
         .map((s) => s.trim())
         .find(Boolean) || 'origin';
-    pushArgs = currentBranch ? ['push', '-u', firstRemote, currentBranch] : ['push'];
+    pushArgs = currentBranch
+      ? ['push', ...forceArgs, '-u', firstRemote, currentBranch]
+      : ['push', ...forceArgs];
   }
 
-  return runGit(workDir, pushArgs, { timeout: 60_000 });
+  const pushRes = await runGit(workDir, pushArgs, { timeout: 60_000 });
+  return {
+    ...pushRes,
+    workDir,
+    branch: currentBranch,
+    forceWithLease,
+    nonFastForward: !pushRes.ok && isNonFastForwardPushError(pushRes.stderr, pushRes.stdout),
+  };
 }
 

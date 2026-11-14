@@ -453,7 +453,16 @@ export async function completeConflictMerge(workDir, options = {}) {
       })
     );
     if (!pushRes.ok) {
-      return buildStepsResult(false, steps);
+      return buildStepsResult(false, steps, {
+        pushFailed: {
+          workDir: pushRes.workDir || pushRepo,
+          branch: pushRes.branch || targetBranch,
+          nonFastForward: Boolean(pushRes.nonFastForward),
+          command: pushRes.command,
+          stdout: pushRes.stdout,
+          stderr: pushRes.stderr,
+        },
+      });
     }
   }
 

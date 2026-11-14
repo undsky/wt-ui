@@ -136,6 +136,58 @@ function showConfirm({ title = '', message = '', confirmText = '', cancelText = 
   });
 }
 
+let pushRejectedResolver = null;
+let pushRejectedKeydownHandler = null;
+
+function settlePushRejected(choice) {
+  const modal = $('modal-push-rejected');
+  if (modal) modal.classList.add('hidden');
+  if (pushRejectedKeydownHandler) {
+    document.removeEventListener('keydown', pushRejectedKeydownHandler, true);
+    pushRejectedKeydownHandler = null;
+  }
+  const resolver = pushRejectedResolver;
+  pushRejectedResolver = null;
+  if (resolver) resolver(choice || 'cancel');
+}
+
+function showPushRejectedDialog({ branch = '' } = {}) {
+  if (pushRejectedResolver) {
+    settlePushRejected('cancel');
+  }
+  const branchRow = $('push-rejected-branch-row');
+  const branchEl = $('push-rejected-branch');
+  const msgEl = $('modal-push-rejected-message');
+  const pullBtn = $('btn-push-rejected-pull');
+  if (!msgEl || !pullBtn) {
+    return Promise.resolve('cancel');
+  }
+
+  if (branchRow && branchEl) {
+    if (branch) {
+      branchEl.textContent = branch;
+      branchRow.classList.remove('hidden');
+    } else {
+      branchRow.classList.add('hidden');
+    }
+  }
+  msgEl.textContent = t('pushRejectedMessage');
+  openModal('modal-push-rejected');
+  pullBtn.focus();
+
+  return new Promise((resolve) => {
+    pushRejectedResolver = resolve;
+    pushRejectedKeydownHandler = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        settlePushRejected('cancel');
+      }
+    };
+    document.addEventListener('keydown', pushRejectedKeydownHandler, true);
+  });
+}
+
 function getActiveProject() {
   return state.projects.find((p) => p.id === state.activeProjectId) || null;
 }
@@ -979,6 +1031,101 @@ async function pullWorktreeRow(workDir, branch, btnEl) {
   }
 }
 
+async function handlePushNonFastForward({ workDir, branch } = {}) {
+  const active = getActiveProject();
+  if (!active || !workDir) return false;
+
+  const choice = await showPushRejectedDialog({ branch });
+  if (choice === 'cancel') return false;
+
+  if (choice === 'force') {
+    try {
+      const res = await api('/api/worktrees/push', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: active.id,
+          workDir,
+          branch,
+          forceWithLease: true,
+        }),
+      });
+      const out = [res.stdout, res.stderr].filter(Boolean).join('\n');
+      appendLog(t('pushSuccessLog', { cmd: res.command }), out);
+      showToast(t('pushForceSuccessToast', { branch: branch || res.branch || '' }), 'success');
+      await refreshWorktrees();
+      return true;
+    } catch (err) {
+      const out = [err.payload?.stdout, err.payload?.stderr].filter(Boolean).join('\n') || err.message;
+      appendLog(t('pushFailLog', { cmd: err.payload?.command || '' }), out);
+      showToast(t('pushFailToast', { msg: err.payload?.stderr || err.message }), 'error');
+      return false;
+    }
+  }
+
+  if (choice === 'pull') {
+    try {
+      const pullRes = await api('/api/worktrees/pull', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: active.id,
+          workDir,
+          branch,
+          autoPush: true,
+        }),
+      });
+      const pullOut = [pullRes.stdout, pullRes.stderr].filter(Boolean).join('\n');
+      appendLog(t('pullSuccessLog', { cmd: pullRes.command }), pullOut);
+    } catch (err) {
+      const out = [err.payload?.stdout, err.payload?.stderr].filter(Boolean).join('\n') || err.message;
+      appendLog(t('pullFailLog', { cmd: err.payload?.command || '' }), out);
+      if (err.payload?.hasConflicts && err.payload?.conflictSession) {
+        showToast(t('conflictDetectedToast'), 'info');
+        await openConflictModal(err.payload.conflictSession);
+        await refreshWorktrees();
+      } else {
+        showToast(t('pullFailToast', { msg: err.payload?.stderr || err.message }), 'error');
+      }
+      return false;
+    }
+
+    try {
+      const pushRes = await api('/api/worktrees/push', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: active.id,
+          workDir,
+          branch,
+        }),
+      });
+      const pushOut = [pushRes.stdout, pushRes.stderr].filter(Boolean).join('\n');
+      appendLog(t('pushSuccessLog', { cmd: pushRes.command }), pushOut);
+      showToast(t('pushPullSuccessToast', { branch: branch || pushRes.branch || '' }), 'success');
+      await refreshWorktrees();
+      return true;
+    } catch (err) {
+      const out = [err.payload?.stdout, err.payload?.stderr].filter(Boolean).join('\n') || err.message;
+      appendLog(t('pushFailLog', { cmd: err.payload?.command || '' }), out);
+      showToast(t('pushFailToast', { msg: err.payload?.stderr || err.message }), 'error');
+      await refreshWorktrees();
+      return false;
+    }
+  }
+
+  return false;
+}
+
+async function handleAutoPushFailure(pushFailed, fallbackMsg = '') {
+  if (!pushFailed) return false;
+  if (pushFailed.nonFastForward) {
+    return handlePushNonFastForward({
+      workDir: pushFailed.workDir,
+      branch: pushFailed.branch,
+    });
+  }
+  showToast(t('pushFailToast', { msg: pushFailed.stderr || fallbackMsg }), 'error');
+  return false;
+}
+
 async function pushWorktreeRow(workDir, branch, btnEl) {
   const active = getActiveProject();
   if (!active || !workDir) return;
@@ -999,7 +1146,14 @@ async function pushWorktreeRow(workDir, branch, btnEl) {
   } catch (err) {
     const out = [err.payload?.stdout, err.payload?.stderr].filter(Boolean).join('\n') || err.message;
     appendLog(t('pushFailLog', { cmd: err.payload?.command || '' }), out);
-    showToast(t('pushFailToast', { msg: err.payload?.stderr || err.message }), 'error');
+    if (err.payload?.nonFastForward) {
+      await handlePushNonFastForward({
+        workDir: err.payload?.workDir || workDir,
+        branch: err.payload?.branch || branch,
+      });
+    } else {
+      showToast(t('pushFailToast', { msg: err.payload?.stderr || err.message }), 'error');
+    }
   } finally {
     restoreBtn();
   }
@@ -1143,6 +1297,10 @@ async function confirmMerge() {
         showToast(t('conflictDetectedToast'), 'info');
         await openConflictModal(err.payload.conflictSession);
         await refreshWorktrees();
+      } else if (err.payload?.pushFailed) {
+        closeModal('modal-merge');
+        await refreshWorktrees();
+        await handleAutoPushFailure(err.payload.pushFailed, err.payload?.stderr || err.message);
       } else {
         showToast(t('mergeFailToast', { msg: err.payload?.stderr || err.message }), 'error');
       }
@@ -1188,10 +1346,15 @@ async function confirmMerge() {
           closeModal('modal-merge');
           showToast(t('conflictDetectedToast'), 'info');
           await openConflictModal(err.payload.conflictSession);
+          await refreshWorktrees();
+        } else if (err.payload?.pushFailed) {
+          closeModal('modal-merge');
+          await refreshWorktrees();
+          await handleAutoPushFailure(err.payload.pushFailed, msg);
         } else {
           showToast(t('mergeAllPartialFailToast', { done, total: branches.length, branch, msg }), 'error');
+          await refreshWorktrees();
         }
-        await refreshWorktrees();
         return;
       }
     }
@@ -2125,6 +2288,11 @@ async function completeConflictResolution() {
       }
       showToast(t('rebaseNextConflictToast'), 'info');
       await refreshWorktrees();
+    } else if (err.payload?.pushFailed) {
+      closeModal('modal-conflict');
+      state.conflictSession = null;
+      await refreshWorktrees();
+      await handleAutoPushFailure(err.payload.pushFailed, msg);
     } else {
       showToast(t('mergeFailToast', { msg }), 'error');
       if (btn && cs.unresolvedCount === 0) btn.disabled = false;
@@ -2918,6 +3086,12 @@ function bindEvents() {
   $('btn-confirm-close')?.addEventListener('click', () => settleConfirm(false));
   $('btn-confirm-cancel')?.addEventListener('click', () => settleConfirm(false));
   $('btn-confirm-ok')?.addEventListener('click', () => settleConfirm(true));
+
+  $('modal-push-rejected-backdrop')?.addEventListener('click', () => settlePushRejected('cancel'));
+  $('btn-push-rejected-close')?.addEventListener('click', () => settlePushRejected('cancel'));
+  $('btn-push-rejected-cancel')?.addEventListener('click', () => settlePushRejected('cancel'));
+  $('btn-push-rejected-force')?.addEventListener('click', () => settlePushRejected('force'));
+  $('btn-push-rejected-pull')?.addEventListener('click', () => settlePushRejected('pull'));
 
   $('modal-ai-progress-backdrop')?.addEventListener('click', closeAiProgressModal);
   $('btn-ai-progress-close-x')?.addEventListener('click', closeAiProgressModal);
