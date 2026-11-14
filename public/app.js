@@ -589,6 +589,81 @@ async function setBranchMode(mode) {
   }
 }
 
+const ACTION_ICON_PATHS = {
+  conflict: '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+  open: '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
+  plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  pull: '<line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>',
+  push: '<line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>',
+  merge: '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>',
+  trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
+};
+
+function renderActionIcon(name) {
+  const paths = ACTION_ICON_PATHS[name] || '';
+  return `<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+}
+
+function renderOpenActionButton({ cls, hasWorktree, toolName, fallbackLabel }) {
+  if (hasWorktree) {
+    const label = toolName || t('toolFallback');
+    const title = t('openWithTool', { tool: label });
+    return `<button type="button" class="btn btn-secondary btn-action btn-open-tool ${cls}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${renderActionIcon('open')}<span class="btn-label btn-tool-name">${escapeHtml(label)}</span></button>`;
+  }
+  const title = fallbackLabel || t('createAndOpen');
+  return `<button type="button" class="btn btn-secondary btn-action ${cls}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${renderActionIcon(fallbackLabel ? 'open' : 'plus')}<span class="btn-label">${escapeHtml(title)}</span></button>`;
+}
+
+function renderRowActionsHtml({
+  mode = 'local',
+  hasConflict = false,
+  hasSync = false,
+  remoteAhead = 0,
+  openBtnHtml = '',
+  mergeBtnCls = '',
+  removeBtnCls = '',
+  removeLabel = '',
+}) {
+  const mergeGroupBtns = [];
+  if (hasConflict) {
+    mergeGroupBtns.push(
+      `<button type="button" class="btn btn-warning btn-action btn-resolve-conflict" title="${escapeHtml(t('resolveConflictBtn'))}">${renderActionIcon('conflict')}<span class="btn-label">${escapeHtml(t('resolveConflictBtn'))}</span></button>`,
+    );
+  }
+  if (mergeBtnCls) {
+    mergeGroupBtns.push(
+      `<button type="button" class="btn btn-success btn-action ${mergeBtnCls}" title="${escapeHtml(t('oneClickMerge'))}">${renderActionIcon('merge')}<span class="btn-label">${escapeHtml(t('oneClickMerge'))}</span></button>`,
+    );
+  }
+
+  const mergeSlotHtml =
+    mergeGroupBtns.length > 0
+      ? `<div class="action-slot action-slot-merge"><div class="action-merge-group" role="group">${mergeGroupBtns.join('')}</div><span class="action-divider" aria-hidden="true"></span></div>`
+      : '<div class="action-slot action-slot-merge action-slot-empty" aria-hidden="true"></div>';
+
+  const toolSlotHtml = `<div class="action-slot action-slot-tool">${openBtnHtml}</div>`;
+
+  let syncSlotHtml = '';
+  if (mode === 'local') {
+    if (hasSync) {
+      const pushTitle = remoteAhead > 0 ? t('pushBtnAhead', { ahead: remoteAhead }) : t('pushBtn');
+      syncSlotHtml = `<div class="action-slot action-slot-sync"><div class="action-btn-group" role="group">
+        <button type="button" class="btn-group-item btn-pull-wt" title="${escapeHtml(t('pullBtn'))}">${renderActionIcon('pull')}<span class="btn-label">${escapeHtml(t('pullBtn'))}</span></button>
+        <button type="button" class="btn-group-item ${remoteAhead > 0 ? 'is-accent ' : ''}btn-push-wt" title="${escapeHtml(pushTitle)}">${renderActionIcon('push')}<span class="btn-label">${escapeHtml(t('pushBtn'))}</span>${remoteAhead > 0 ? `<span class="action-count-badge">${remoteAhead}</span>` : ''}</button>
+      </div></div>`;
+    } else {
+      syncSlotHtml = '<div class="action-slot action-slot-sync action-slot-empty" aria-hidden="true"></div>';
+    }
+  }
+
+  const dangerSlotHtml = removeBtnCls
+    ? `<div class="action-slot action-slot-danger"><span class="action-divider" aria-hidden="true"></span><button type="button" class="btn-icon-danger ${removeBtnCls}" title="${escapeHtml(removeLabel)}" aria-label="${escapeHtml(removeLabel)}">${renderActionIcon('trash')}</button></div>`
+    : '<div class="action-slot action-slot-danger action-slot-empty" aria-hidden="true"></div>';
+
+  const modeClass = mode === 'remote' ? 'actions-cell--remote' : 'actions-cell--local';
+  return `<div class="actions-cell ${modeClass}">${mergeSlotHtml}${toolSlotHtml}${syncSlotHtml}${dangerSlotHtml}</div>`;
+}
+
 function renderWorktrees() {
   applyBranchModeUI();
   if (state.branchMode === 'remote') {
@@ -665,10 +740,24 @@ function renderWorktrees() {
           </div>`;
 
     const boundTool = getWorktreeTool(branchName);
-    const openLabel = hasWorktree ? t('openWithTool', { tool: boundTool?.name || t('toolFallback') }) : t('createAndOpen');
     const remoteAhead = item.remote?.ahead || 0;
-    const pushLabel = remoteAhead > 0 ? t('pushBtnAhead', { ahead: remoteAhead }) : t('pushBtn');
-    const pushBtnCls = remoteAhead > 0 ? 'btn-primary' : 'btn-secondary';
+    const hasConflict = Boolean((wt?.changes?.conflicted || wt?.operation) && wt?.path);
+    const hasSync = Boolean(hasWorktree && wt?.path);
+    const canMerge = Boolean(hasWorktree && !isMain && item.branch);
+    const canRemove = Boolean(!isMain && (hasWorktree || (!isDefault && item.branch)));
+    const actionsHtml = renderRowActionsHtml({
+      hasConflict,
+      hasSync,
+      remoteAhead,
+      openBtnHtml: renderOpenActionButton({
+        cls: 'btn-open-wt',
+        hasWorktree,
+        toolName: boundTool?.name,
+      }),
+      mergeBtnCls: canMerge ? 'btn-merge-wt' : '',
+      removeBtnCls: canRemove ? 'btn-remove-wt' : '',
+      removeLabel: hasWorktree ? t('removeBtn') : t('deleteBtn'),
+    });
 
     tr.innerHTML = `
       <td>
@@ -681,32 +770,7 @@ function renderWorktrees() {
         </div>
       </td>
       <td>${divHtml}</td>
-      <td class="col-actions">
-        <div class="actions-cell">
-          ${
-            (wt?.changes?.conflicted || wt?.operation) && wt?.path
-              ? `<button class="btn btn-warning btn-sm btn-resolve-conflict">${escapeHtml(t('resolveConflictBtn'))}</button>`
-              : ''
-          }
-          ${
-            hasWorktree && wt?.path
-              ? `<button class="btn btn-secondary btn-sm btn-pull-wt">${escapeHtml(t('pullBtn'))}</button>
-                 <button class="btn ${pushBtnCls} btn-sm btn-push-wt">${escapeHtml(pushLabel)}</button>`
-              : ''
-          }
-          <button class="btn btn-secondary btn-sm btn-open-wt">${escapeHtml(openLabel)}</button>
-          ${
-            hasWorktree && !isMain && item.branch
-              ? `<button class="btn btn-success btn-sm btn-merge-wt">${escapeHtml(t('oneClickMerge'))}</button>`
-              : ''
-          }
-          ${
-            !isMain && (hasWorktree || (!isDefault && item.branch))
-              ? `<button class="btn btn-danger-ghost btn-sm btn-remove-wt">${escapeHtml(hasWorktree ? t('removeBtn') : t('deleteBtn'))}</button>`
-              : ''
-          }
-        </div>
-      </td>
+      <td class="col-actions">${actionsHtml}</td>
     `;
 
     const resolveBtn = tr.querySelector('.btn-resolve-conflict');
@@ -797,9 +861,18 @@ function renderRemoteBranches() {
     }
 
     const boundTool = getWorktreeTool(item.branch);
-    const openLabel = item.worktreePath
-      ? t('openWithTool', { tool: boundTool?.name || t('toolFallback') })
-      : t('checkoutWorktreeBtn');
+    const remoteActionsHtml = renderRowActionsHtml({
+      mode: 'remote',
+      openBtnHtml: renderOpenActionButton({
+        cls: 'btn-checkout-remote',
+        hasWorktree: Boolean(item.worktreePath),
+        toolName: boundTool?.name,
+        fallbackLabel: t('checkoutWorktreeBtn'),
+      }),
+      mergeBtnCls: !item.isDefault ? 'btn-merge-remote' : '',
+      removeBtnCls: !item.isDefault ? 'btn-delete-remote' : '',
+      removeLabel: t('deleteBtn'),
+    });
 
     tr.innerHTML = `
       <td>
@@ -813,21 +886,7 @@ function renderRemoteBranches() {
       </td>
       <td><div class="diff-stats">${divParts.join('') || `<span class="muted">${escapeHtml(t('noDiff'))}</span>`}</div></td>
       <td><div class="status-pills">${metaParts.join(' ')}</div></td>
-      <td class="col-actions">
-        <div class="actions-cell">
-          ${
-            !item.isDefault
-              ? `<button class="btn btn-success btn-sm btn-merge-remote">${escapeHtml(t('oneClickMerge'))}</button>`
-              : ''
-          }
-          <button class="btn btn-secondary btn-sm btn-checkout-remote">${escapeHtml(openLabel)}</button>
-          ${
-            !item.isDefault
-              ? `<button class="btn btn-danger-ghost btn-sm btn-delete-remote">${escapeHtml(t('deleteBtn'))}</button>`
-              : ''
-          }
-        </div>
-      </td>
+      <td class="col-actions">${remoteActionsHtml}</td>
     `;
 
     const mergeBtn = tr.querySelector('.btn-merge-remote');
@@ -1072,14 +1131,25 @@ async function openWorktreeRow(branch, shouldCreate, base = '', explicitToolId =
   }
 }
 
+function setActionButtonBusy(btnEl, busyLabel, fallbackLabel) {
+  if (!btnEl) return () => {};
+  const labelEl = btnEl.querySelector('.btn-label') || btnEl;
+  const badgeEl = btnEl.querySelector('.action-count-badge');
+  const origLabel = labelEl.textContent;
+  btnEl.disabled = true;
+  labelEl.textContent = busyLabel;
+  if (badgeEl) badgeEl.classList.add('hidden');
+  return () => {
+    btnEl.disabled = false;
+    labelEl.textContent = origLabel || fallbackLabel;
+    if (badgeEl) badgeEl.classList.remove('hidden');
+  };
+}
+
 async function pullWorktreeRow(workDir, branch, btnEl) {
   const active = getActiveProject();
   if (!active || !workDir) return;
-  const origLabel = btnEl ? btnEl.textContent : '';
-  if (btnEl) {
-    btnEl.disabled = true;
-    btnEl.textContent = t('pullingBtn');
-  }
+  const restoreBtn = setActionButtonBusy(btnEl, t('pullingBtn'), t('pullBtn'));
   try {
     const res = await api('/api/worktrees/pull', {
       method: 'POST',
@@ -1107,21 +1177,14 @@ async function pullWorktreeRow(workDir, branch, btnEl) {
       showToast(t('pullFailToast', { msg: err.payload?.stderr || err.message }), 'error');
     }
   } finally {
-    if (btnEl) {
-      btnEl.disabled = false;
-      btnEl.textContent = origLabel || t('pullBtn');
-    }
+    restoreBtn();
   }
 }
 
 async function pushWorktreeRow(workDir, branch, btnEl) {
   const active = getActiveProject();
   if (!active || !workDir) return;
-  const origLabel = btnEl ? btnEl.textContent : '';
-  if (btnEl) {
-    btnEl.disabled = true;
-    btnEl.textContent = t('pushingBtn');
-  }
+  const restoreBtn = setActionButtonBusy(btnEl, t('pushingBtn'), t('pushBtn'));
   try {
     const res = await api('/api/worktrees/push', {
       method: 'POST',
@@ -1143,10 +1206,7 @@ async function pushWorktreeRow(workDir, branch, btnEl) {
     appendLog(t('pushFailLog', { cmd: err.payload?.command || '' }), out);
     showToast(t('pushFailToast', { msg: err.payload?.stderr || err.message }), 'error');
   } finally {
-    if (btnEl) {
-      btnEl.disabled = false;
-      btnEl.textContent = origLabel || t('pushBtn');
-    }
+    restoreBtn();
   }
 }
 
