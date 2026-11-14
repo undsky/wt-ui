@@ -5,7 +5,14 @@ import { hostname as osHostname } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { checkEnvironment, invalidateEnvironmentCache, parseWtJson, runWt } from './wt-resolver.js';
+import {
+  buildWtMergeArgs,
+  checkEnvironment,
+  invalidateEnvironmentCache,
+  parseWtJson,
+  resolveApprovalGate,
+  runWt,
+} from './wt-resolver.js';
 import { autoInstallWorktrunk } from './wt-installer.js';
 import { browsePath, inspectGitRepo, parseCodeWorkspace, pickNativePath } from './workspace.js';
 import {
@@ -446,13 +453,18 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           return;
         }
 
-        const args = ['list', '--format=json'];
-        if (includeBranches) args.push('--branches');
+        const args = ['list', '--config-set', 'list.json-schema=2', '--format=json'];
+        if (includeBranches) {
+          args.push('--branches');
+        } else {
+          args.push('--config-set', 'list.branches=false');
+        }
         if (full) args.push('--full');
 
         const result = await runWt(env.wtBin, project.path, args);
         const parsed = parseWtJson(result.stdout);
-        if (Array.isArray(parsed?.items)) {
+        // Schema 2 natively includes `worktree.operation`; only fall back to Git probing for Schema 1.
+        if (parsed?.schema !== 2 && Array.isArray(parsed?.items)) {
           await Promise.all(
             parsed.items.map(async (item) => {
               if (item?.worktree?.path && !item.worktree.operation) {
@@ -494,18 +506,39 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         }
 
         const branch = String(body.branch).trim();
+        const create = Boolean(body.create);
+        const noHooks = Boolean(body.noHooks);
+        const approvalGate = await resolveApprovalGate({
+          wtBin: env.wtBin,
+          repoPath: project.path,
+          approveHooks: Boolean(body.approveHooks),
+          skipHooks: noHooks,
+          phases: create ? ['pre-switch', 'post-switch', 'pre-start', 'post-start'] : ['pre-switch', 'post-switch'],
+        });
+        if (!approvalGate.allowed) {
+          sendJson(res, 409, {
+            ok: false,
+            approvalRequired: true,
+            unapprovedCommands: approvalGate.unapprovedCommands,
+            error: '项目中存在未批准的 Worktrunk hook 命令，需要确认后执行。',
+          });
+          return;
+        }
+
         const resolvedToolId = body.toolId || project.worktreeTools?.[branch] || project.defaultToolId || 'claude';
         const tool = findToolById(resolvedToolId, store.customTools);
         const result = await switchAndOpenWorktree({
           wtBin: env.wtBin,
           repoPath: project.path,
           branch,
-          create: Boolean(body.create),
+          create,
           clobber: Boolean(body.clobber),
           base: body.base ? String(body.base).trim() : '',
           tool,
           prompt: body.prompt ? String(body.prompt).trim() : '',
           preferredTerminal: store.generalConfig?.preferredTerminal || '',
+          passYes: approvalGate.passYes,
+          noHooks,
         });
 
         if (result.ok && tool?.id) {
@@ -544,17 +577,34 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           return;
         }
 
-        const args = ['merge'];
-        if (body.target) args.push(String(body.target).trim());
-        args.push('--branch', String(body.branch).trim());
-        if (body.noSquash) args.push('--no-squash');
-        if (body.noCommit) args.push('--no-commit');
-        if (body.noRebase) args.push('--no-rebase');
-        if (body.noRemove) args.push('--no-remove');
-        if (body.noFf) args.push('--no-ff');
-        if (body.noHooks) args.push('--no-hooks');
-        args.push('--format=json', '-y');
+        const mergeOptions = {
+          target: body.target ? String(body.target).trim() : '',
+          branch: String(body.branch).trim(),
+          noSquash: Boolean(body.noSquash),
+          noCommit: Boolean(body.noCommit),
+          noRebase: Boolean(body.noRebase),
+          noRemove: Boolean(body.noRemove),
+          noFf: Boolean(body.noFf),
+          noHooks: Boolean(body.noHooks),
+        };
+        const approvalGate = await resolveApprovalGate({
+          wtBin: env.wtBin,
+          repoPath: project.path,
+          approveHooks: Boolean(body.approveHooks),
+          skipHooks: mergeOptions.noHooks,
+          phases: ['pre-commit', 'post-commit', 'pre-merge', 'post-merge', 'pre-remove', 'post-remove'],
+        });
+        if (!approvalGate.allowed) {
+          sendJson(res, 409, {
+            ok: false,
+            approvalRequired: true,
+            unapprovedCommands: approvalGate.unapprovedCommands,
+            error: '项目中存在未批准的 Worktrunk hook 命令，需要确认后执行。',
+          });
+          return;
+        }
 
+        const args = buildWtMergeArgs(mergeOptions, { includeYes: approvalGate.passYes });
         const result = await runWt(env.wtBin, project.path, args, { timeout: 120_000 });
         const parsed = parseWtJson(result.stdout);
         let conflictInfo = { hasConflicts: false, conflictSession: null };
@@ -565,23 +615,32 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
 
         if (!result.ok) {
           conflictInfo = await detectOrStartLocalConflictSession(project.path, {
-            sourceBranch: String(body.branch).trim(),
-            targetBranch: body.target ? String(body.target).trim() : '',
-            noFf: Boolean(body.noFf),
-            noSquash: Boolean(body.noSquash),
+            sourceBranch: mergeOptions.branch,
+            targetBranch: mergeOptions.target,
+            noFf: mergeOptions.noFf,
+            noSquash: mergeOptions.noSquash,
+            noRebase: mergeOptions.noRebase,
             wtOutput: `${result.stdout || ''}\n${result.stderr || ''}`,
+            wtBin: env.wtBin,
+            wtMergeOptions: mergeOptions,
           });
           if (conflictInfo.conflictSession) {
             conflictInfo.conflictSession.autoPush = Boolean(body.autoPush);
           }
-        } else if (body.autoPush) {
-          const pushRes = await pushWorktreeBranch(project.path, {
-            branch: body.target ? String(body.target).trim() : '',
-          });
-          finalOk = pushRes.ok;
-          finalCmd = `${result.command} && ${pushRes.command}`;
-          finalStdout = [result.stdout, pushRes.stdout].filter(Boolean).join('\n');
-          finalStderr = [result.stderr, pushRes.stderr].filter(Boolean).join('\n');
+        } else {
+          if (!mergeOptions.noRemove && project.worktreeTools && mergeOptions.branch in project.worktreeTools) {
+            delete project.worktreeTools[mergeOptions.branch];
+            saveStore(store);
+          }
+          if (body.autoPush) {
+            const pushRes = await pushWorktreeBranch(project.path, {
+              branch: mergeOptions.target,
+            });
+            finalOk = pushRes.ok;
+            finalCmd = `${result.command} && ${pushRes.command}`;
+            finalStdout = [result.stdout, pushRes.stdout].filter(Boolean).join('\n');
+            finalStderr = [result.stderr, pushRes.stderr].filter(Boolean).join('\n');
+          }
         }
         sendJson(res, finalOk ? 200 : 422, {
           ok: finalOk,
@@ -613,19 +672,60 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         }
 
         const targetBranch = String(body.branch).trim();
-        const args = ['remove', targetBranch, '--foreground', '--format=json', '-y'];
+        const noHooks = Boolean(body.noHooks);
+        const approvalGate = await resolveApprovalGate({
+          wtBin: env.wtBin,
+          repoPath: project.path,
+          approveHooks: Boolean(body.approveHooks),
+          skipHooks: noHooks,
+          phases: ['pre-remove', 'post-remove'],
+        });
+        if (!approvalGate.allowed) {
+          sendJson(res, 409, {
+            ok: false,
+            approvalRequired: true,
+            unapprovedCommands: approvalGate.unapprovedCommands,
+            error: '项目中存在未批准的 Worktrunk hook 命令，需要确认后执行。',
+          });
+          return;
+        }
+
+        const args = ['remove', targetBranch, '--foreground', '--format=json'];
+        if (body.noDeleteBranch) {
+          args.push('--no-delete-branch');
+        } else {
+          args.push('--config-set', 'remove.delete-branch=true');
+        }
         if (body.force) args.push('--force');
         if (body.forceDelete) args.push('-D');
-        if (body.noDeleteBranch) args.push('--no-delete-branch');
+        if (noHooks) args.push('--no-hooks');
+        if (approvalGate.passYes) args.push('-y');
 
         const result = await runWt(env.wtBin, project.path, args);
         const parsed = parseWtJson(result.stdout);
-        const outcome = Array.isArray(parsed) ? parsed[0]?.branch_outcome : parsed?.branch_outcome;
-        if (result.ok && outcome !== 'retained_unmerged' && outcome !== 'retained_failed') {
-          if (project.worktreeTools && targetBranch in project.worktreeTools) {
-            delete project.worktreeTools[targetBranch];
-            saveStore(store);
+        const itemResult = Array.isArray(parsed) ? parsed[0] : parsed;
+        const outcome = itemResult?.branch_outcome;
+        if (result.ok && project.worktreeTools) {
+          let dirtyStore = false;
+          const deleteToolKey = (key) => {
+            if (key && key in project.worktreeTools) {
+              delete project.worktreeTools[key];
+              dirtyStore = true;
+            }
+          };
+          if (itemResult?.path) {
+            deleteToolKey(itemResult.path);
+            for (const existingKey of Object.keys(project.worktreeTools)) {
+              if (samePath(existingKey, itemResult.path)) {
+                deleteToolKey(existingKey);
+              }
+            }
           }
+          if (outcome === 'deleted' || outcome === 'not_attempted') {
+            deleteToolKey(targetBranch);
+            if (itemResult?.branch) deleteToolKey(itemResult.branch);
+          }
+          if (dirtyStore) saveStore(store);
         }
         sendJson(res, result.ok ? 200 : 422, {
           ok: result.ok,
@@ -746,11 +846,21 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           return;
         }
         const workDir = await resolveProjectWorkDir(project, body.workDir);
+        const env = await checkEnvironment({ wtBin: explicitWtBin }).catch(() => ({ wtBin: '' }));
         const result = await completeConflictMerge(workDir, {
           sourceBranch: body.sourceBranch,
           targetBranch: body.targetBranch,
           autoPush: Boolean(body.autoPush),
+          wtBin: env?.wtBin || '',
+          repoPath: project.path,
+          wtMergeOptions: body.wtMergeOptions || null,
         });
+        if (result.ok && result.resumedWtMerge && body.wtMergeOptions?.branch && !body.wtMergeOptions?.noRemove) {
+          if (project.worktreeTools && body.wtMergeOptions.branch in project.worktreeTools) {
+            delete project.worktreeTools[body.wtMergeOptions.branch];
+            saveStore(store);
+          }
+        }
         sendJson(res, result.ok ? 200 : 422, result);
         return;
       }
@@ -764,6 +874,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           return;
         }
         const workDir = await resolveProjectWorkDir(project, body.workDir);
+        const env = await checkEnvironment({ wtBin: explicitWtBin }).catch(() => ({ wtBin: '' }));
         const trackedFiles = Array.isArray(body.trackedFiles) ? body.trackedFiles : [];
         const wantsStream = Boolean(body.stream) || String(req.headers.accept || '').includes('text/event-stream');
 
@@ -783,11 +894,20 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
               sourceBranch: body.sourceBranch,
               targetBranch: body.targetBranch,
               autoPush: Boolean(body.autoPush),
+              wtBin: env?.wtBin || '',
+              repoPath: project.path,
+              wtMergeOptions: body.wtMergeOptions || null,
               trackedFiles,
               aiConfig: store.aiConfig,
               onProgress: (ev) => sendEvent(ev),
             });
             if (result.ok) {
+              if (result.resumedWtMerge && body.wtMergeOptions?.branch && !body.wtMergeOptions?.noRemove) {
+                if (project.worktreeTools && body.wtMergeOptions.branch in project.worktreeTools) {
+                  delete project.worktreeTools[body.wtMergeOptions.branch];
+                  saveStore(store);
+                }
+              }
               sendEvent({ type: 'done', result });
             } else {
               sendEvent({
@@ -815,9 +935,18 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
             sourceBranch: body.sourceBranch,
             targetBranch: body.targetBranch,
             autoPush: Boolean(body.autoPush),
+            wtBin: env?.wtBin || '',
+            repoPath: project.path,
+            wtMergeOptions: body.wtMergeOptions || null,
             trackedFiles,
             aiConfig: store.aiConfig,
           });
+          if (result.ok && result.resumedWtMerge && body.wtMergeOptions?.branch && !body.wtMergeOptions?.noRemove) {
+            if (project.worktreeTools && body.wtMergeOptions.branch in project.worktreeTools) {
+              delete project.worktreeTools[body.wtMergeOptions.branch];
+              saveStore(store);
+            }
+          }
           sendJson(res, result.ok ? 200 : 422, result);
         } catch (err) {
           const status = await getConflictStatus(workDir, trackedFiles).catch(() => null);

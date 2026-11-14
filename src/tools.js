@@ -423,22 +423,10 @@ export function findLinuxTerminal(preferredTerminal = '') {
 
 /**
  * Build the argv (without terminal wrapper) for the command to run in the new terminal.
+ * `wt switch` has already created/switched the worktree and executed hooks beforehand,
+ * so the terminal only launches the tool in `worktreePath` without invoking `wt switch` a second time.
  */
-function buildLaunchArgv({ wtBin, repoPath, branch, tool, extraArgs }) {
-  if (wtBin && repoPath && branch) {
-    return [
-      wtBin,
-      '-C',
-      repoPath,
-      'switch',
-      branch,
-      '--no-cd',
-      '-y',
-      '-x',
-      tool.command,
-      ...(extraArgs.length ? ['--', ...extraArgs] : []),
-    ];
-  }
+function buildLaunchArgv({ tool, extraArgs }) {
   return [tool.command, ...extraArgs];
 }
 
@@ -450,17 +438,14 @@ function launchScriptDir() {
 
 /**
  * Spawn an interactive CLI tool inside a new terminal window at `worktreePath`.
- * If `wtBin` and `repoPath` and `branch` are provided, runs `wt -C <repoPath> switch <branch> -x <cmd>`
- * so Worktrunk hooks and environment are preserved.
  * @returns {Promise<{ ok: boolean, error?: string }>}
  */
 export async function spawnInNewTerminal({
-  wtBin,
-  repoPath,
   branch,
   tool,
   prompt,
   worktreePath,
+  repoPath,
   preferredTerminal = '',
 }) {
   const extraArgs = [...(tool.args || [])];
@@ -468,7 +453,7 @@ export async function spawnInNewTerminal({
     extraArgs.push(prompt);
   }
   const cwd = worktreePath && existsSync(worktreePath) ? worktreePath : repoPath;
-  const argv = tool.id === 'terminal' ? null : buildLaunchArgv({ wtBin, repoPath, branch, tool, extraArgs });
+  const argv = tool.id === 'terminal' ? null : buildLaunchArgv({ tool, extraArgs });
   const pref = String(preferredTerminal || '').trim().toLowerCase();
 
   if (process.platform === 'win32') {
@@ -695,19 +680,23 @@ export async function switchAndOpenWorktree({
   tool,
   prompt = '',
   preferredTerminal = '',
+  passYes = true,
+  noHooks = false,
 }) {
   const displayCommand = buildDisplaySwitchCommand({ branch, create, base, tool, prompt });
 
-  // Always run `wt switch` with --no-cd -y --format=json first so we get immediate,
-  // structured validation & worktree path even for CLI tools.
+  // Run `wt switch` once with --no-cd --format=json to handle creation/hooks/validation cleanly.
   const baseArgs = ['switch'];
   if (create) baseArgs.push('-c');
   if (clobber) baseArgs.push('--clobber');
   baseArgs.push(branch);
   if (base) baseArgs.push('--base', base);
-  baseArgs.push('--no-cd', '-y', '--format=json');
+  baseArgs.push('--no-cd');
+  if (noHooks) baseArgs.push('--no-hooks');
+  if (passYes) baseArgs.push('-y');
+  baseArgs.push('--format=json');
 
-  // For GUI tools, we can pass `-x` directly to `wt switch` on the same invocation.
+  // For GUI tools, pass `-x` directly to `wt switch` on this single invocation.
   const isGui = tool && tool.kind === 'gui' && tool.command;
   if (isGui) {
     const toolArgs = [...(tool.args || [])];
@@ -745,22 +734,23 @@ export async function switchAndOpenWorktree({
 
   const worktreePath = json?.path || json?.worktree?.path || repoPath;
 
-  // For CLI tools, spawn a new interactive terminal window in the worktree.
+  // For CLI tools, spawn a new interactive terminal directly in `worktreePath`
+  // (only if `wt switch` itself succeeded).
   let launch = null;
-  if (tool && tool.kind === 'cli' && tool.command) {
+  if (result.ok && tool && tool.kind === 'cli' && tool.command) {
     launch = await spawnInNewTerminal({
-      wtBin,
-      repoPath,
       branch,
       tool,
       prompt,
       worktreePath,
+      repoPath,
       preferredTerminal,
     });
   }
 
+  const finalOk = result.ok && (!launch || launch.ok);
   return {
-    ok: result.ok,
+    ok: finalOk,
     command: displayCommand,
     executedCommand: result.command,
     stdout: result.stdout,

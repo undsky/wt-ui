@@ -305,35 +305,39 @@ function renderToolSelects() {
   const selectEl = $('select-tool');
   const currentToolId = selectEl.value || 'claude';
   buildOptions(selectEl, currentToolId);
-  updateCommandPreview();
 }
 
-function updateCommandPreview() {
-  const previewEl = $('cmd-preview');
-  if (!previewEl) return;
-  const base = $('input-base')?.value.trim() || '';
-  const branch = generateRandomBranchName(base);
-  const create = true;
-  const toolId = $('select-tool').value;
-  const tool = getToolById(toolId);
-
-  const parts = ['wt', 'switch'];
-  if (create) parts.push('-c');
-  parts.push(branch);
-  if (base) parts.push('--base', base);
-
-  if (tool && tool.kind === 'gui' && tool.command) {
-    parts.push('--no-cd', '-x', tool.command);
-    if (tool.args && tool.args.length > 0) {
-      parts.push('--', ...tool.args);
+async function apiWithHookApproval(path, payload) {
+  try {
+    return await api(path, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    if (!err.payload?.approvalRequired || payload.approveHooks) {
+      throw err;
     }
-  } else if (tool && tool.kind === 'cli' && tool.command) {
-    parts.push('-x', tool.command);
-    const extra = [...(tool.args || [])];
-    if (extra.length > 0) parts.push('--', ...extra);
+    const cmds = Array.isArray(err.payload.unapprovedCommands) ? err.payload.unapprovedCommands : [];
+    const formatted = cmds
+      .map((c) => `• [${c.phase || 'hook'}${c.name ? `:${c.name}` : ''}] ${c.template || ''}`.trim())
+      .join('\n');
+    const approved = await showConfirm({
+      title: t('hookApprovalTitle'),
+      message: t('hookApprovalPrompt', { commands: formatted || '-' }),
+      confirmText: t('hookApprovalConfirmBtn'),
+      danger: false,
+    });
+    if (!approved) {
+      const cancelErr = new Error(t('hookApprovalCancelToast'));
+      cancelErr.approvalCancelled = true;
+      throw cancelErr;
+    }
+    const res = await api(path, {
+      method: 'POST',
+      body: JSON.stringify({ ...payload, approveHooks: true }),
+    });
+    return { ...res, hookApproved: true };
   }
-
-  $('cmd-preview').textContent = parts.join(' ');
 }
 
 function renderSidebar() {
@@ -536,14 +540,15 @@ function renderActionIcon(name) {
   return `<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 }
 
-function renderOpenActionButton({ cls, hasWorktree, toolName }) {
+function renderOpenActionButton({ cls, hasWorktree, toolName, disabled = false }) {
+  const disabledAttr = disabled ? ' disabled' : '';
   if (hasWorktree) {
     const label = toolName || t('toolFallback');
     const title = t('openWithTool', { tool: label });
-    return `<button type="button" class="btn btn-secondary btn-action btn-open-tool ${cls}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${renderActionIcon('open')}<span class="btn-label btn-tool-name">${escapeHtml(label)}</span></button>`;
+    return `<button type="button" class="btn btn-secondary btn-action btn-open-tool ${cls}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"${disabledAttr}>${renderActionIcon('open')}<span class="btn-label btn-tool-name">${escapeHtml(label)}</span></button>`;
   }
   const title = t('createAndOpen');
-  return `<button type="button" class="btn btn-secondary btn-action ${cls}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${renderActionIcon('plus')}<span class="btn-label">${escapeHtml(title)}</span></button>`;
+  return `<button type="button" class="btn btn-secondary btn-action ${cls}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"${disabledAttr}>${renderActionIcon('plus')}<span class="btn-label">${escapeHtml(title)}</span></button>`;
 }
 
 function renderRowActionsHtml({
@@ -604,7 +609,6 @@ function renderWorktrees() {
   const defaultBranch = state.worktreeData?.repo?.default_branch || 'main';
   const mainBranch = getMainWorktreeBranch(state.worktreeData);
   applyDefaultBranchToBaseInput(mainBranch, false);
-  updateCommandPreview();
   $('wt-count').textContent = String(items.length);
   const mergeAllBtn = $('btn-merge-all');
   if (mergeAllBtn) {
@@ -622,18 +626,34 @@ function renderWorktrees() {
     const wt = item.worktree;
     const hasWorktree = Boolean(wt);
     const isMain = Boolean(wt?.main);
+    const isLocked = Boolean(wt?.locked);
+    const isPrunable = Boolean(wt?.prunable);
     const isDefault = Boolean(item.branch && item.branch === defaultBranch);
     const gutter = wt?.current ? '@' : wt?.main ? '^' : wt ? '+' : '/';
 
-    // Status pills
+    // Status pills (Schema 2 independent fields + working tree changes)
     const pills = [];
     if (isDefault) pills.push(`<span class="badge badge-success">${escapeHtml(t('defaultBranchTag'))}</span>`);
     if (isMain) pills.push(`<span class="badge badge-info">${escapeHtml(t('mainWorktreeTag'))}</span>`);
     if (!hasWorktree) pills.push(`<span class="badge badge-neutral">${escapeHtml(t('noWorktreeTag'))}</span>`);
+    if (item.marker) pills.push(`<span class="badge badge-info">${escapeHtml(item.marker)}</span>`);
+    if (wt?.detached) pills.push(`<span class="badge badge-neutral">${escapeHtml(t('detachedTag'))}</span>`);
+    if (isLocked) {
+      const lockTitle = wt.locked.reason ? ` title="${escapeHtml(wt.locked.reason)}"` : '';
+      pills.push(`<span class="badge badge-warn"${lockTitle}>${escapeHtml(t('lockedTag'))}</span>`);
+    }
+    if (isPrunable) {
+      const pruneTitle = wt.prunable.reason ? ` title="${escapeHtml(wt.prunable.reason)}"` : '';
+      pills.push(`<span class="badge badge-danger"${pruneTitle}>${escapeHtml(t('prunableTag'))}</span>`);
+    }
+    if (wt?.branch_mismatch) pills.push(`<span class="badge badge-warn">${escapeHtml(t('branchMismatchTag'))}</span>`);
+    if (wt?.duplicate_branch) pills.push(`<span class="badge badge-warn">${escapeHtml(t('duplicateBranchTag'))}</span>`);
     if (wt?.changes?.conflicted) pills.push(`<span class="badge badge-danger">${escapeHtml(t('conflictTag'))}</span>`);
     if (wt?.changes?.staged) pills.push(`<span class="badge badge-success">${escapeHtml(t('stagedTag'))}</span>`);
     if (wt?.changes?.modified) pills.push(`<span class="badge badge-warn">${escapeHtml(t('modifiedTag'))}</span>`);
     if (wt?.changes?.untracked) pills.push(`<span class="badge badge-neutral">${escapeHtml(t('untrackedTag'))}</span>`);
+    if (wt?.changes?.renamed) pills.push(`<span class="badge badge-neutral">${escapeHtml(t('renamedTag'))}</span>`);
+    if (wt?.changes?.deleted) pills.push(`<span class="badge badge-warn">${escapeHtml(t('deletedTag'))}</span>`);
     if (wt?.operation) pills.push(`<span class="badge badge-warn">${escapeHtml(wt.operation)} ↻</span>`);
 
     // Divergence
@@ -641,8 +661,10 @@ function renderWorktrees() {
     const divStats = [];
     const divPills = [];
     if (db) {
-      if (db.ahead || db.behind) {
-        divStats.push(`<span>↑${db.ahead ?? 0} ↓${db.behind ?? 0}</span>`);
+      if (db.orphan) {
+        divPills.push(`<span class="badge badge-neutral">${escapeHtml(t('orphanTag'))}</span>`);
+      } else if ((db.ahead !== null && db.ahead !== undefined && db.ahead > 0) || (db.behind !== null && db.behind !== undefined && db.behind > 0)) {
+        divStats.push(`<span>↑${db.ahead ?? '-'} ↓${db.behind ?? '-'}</span>`);
       }
       if (db.diff && (db.diff.added || db.diff.deleted)) {
         divStats.push(`<span class="mono">+${db.diff.added} -${db.diff.deleted}</span>`);
@@ -665,12 +687,14 @@ function renderWorktrees() {
             ${divPills.length > 0 ? `<div class="status-pills">${divPills.join('')}</div>` : ''}
           </div>`;
 
-    const boundTool = getWorktreeTool(branchName);
-    const remoteAhead = item.remote?.ahead || 0;
-    const hasConflict = Boolean((wt?.changes?.conflicted || wt?.operation) && wt?.path);
-    const hasSync = Boolean(hasWorktree && wt?.path);
-    const canMerge = Boolean(hasWorktree && !isMain && item.branch);
-    const canRemove = Boolean(!isMain && (hasWorktree || (!isDefault && item.branch)));
+    const toolKey = item.branch || wt?.path || branchName;
+    const boundTool = getWorktreeTool(toolKey);
+    const remoteAhead =
+      item.upstream?.ahead ?? (typeof item.remote === 'object' && item.remote ? item.remote.ahead : 0) ?? 0;
+    const hasConflict = Boolean(!isPrunable && (wt?.changes?.conflicted || wt?.operation) && wt?.path);
+    const hasSync = Boolean(hasWorktree && !isPrunable && wt?.path);
+    const canMerge = Boolean(hasWorktree && !isPrunable && !isMain && item.branch);
+    const canRemove = Boolean(!isMain && !isLocked && (hasWorktree || (!isDefault && item.branch)));
     const { toolSyncHtml, manageHtml } = renderRowActionsHtml({
       hasConflict,
       hasSync,
@@ -679,6 +703,7 @@ function renderWorktrees() {
         cls: 'btn-open-wt',
         hasWorktree,
         toolName: boundTool?.name,
+        disabled: isPrunable,
       }),
       mergeBtnCls: canMerge ? 'btn-merge-wt' : '',
       removeBtnCls: canRemove ? 'btn-remove-wt' : '',
@@ -716,8 +741,15 @@ function renderWorktrees() {
     }
 
     tr.querySelector('.btn-open-wt').addEventListener('click', () => {
+      if (isPrunable) return;
       const toolId = hasWorktree ? boundTool?.id : ($('select-tool').value || 'claude');
-      openWorktreeRow(branchName, false, '', toolId);
+      // Detached HEAD or duplicate branch checkouts must be targeted by worktree path
+      const switchTarget = item.branch
+        ? wt?.duplicate_branch && wt?.path
+          ? wt.path
+          : item.branch
+        : wt?.path || branchName;
+      openWorktreeRow(switchTarget, false, '', toolId, branchName);
     });
 
     const mergeBtn = tr.querySelector('.btn-merge-wt');
@@ -727,7 +759,7 @@ function renderWorktrees() {
 
     const removeBtn = tr.querySelector('.btn-remove-wt');
     if (removeBtn) {
-      removeBtn.addEventListener('click', () => removeWorktreeRow(item.branch || wt.path));
+      removeBtn.addEventListener('click', () => removeWorktreeRow(item.branch || wt.path, item));
     }
 
     tbody.appendChild(tr);
@@ -850,13 +882,10 @@ async function deleteWorkspace(wsId) {
 
 async function switchWorktreeWithClobberPrompt(payload) {
   try {
-    return await api('/api/worktrees/switch', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
+    return await apiWithHookApproval('/api/worktrees/switch', payload);
   } catch (err) {
     const stderr = err.payload?.stderr || err.message || '';
-    if (!payload.clobber && /directory already exists|--clobber/i.test(stderr)) {
+    if (!err.approvalCancelled && !payload.clobber && /directory already exists|--clobber/i.test(stderr)) {
       appendLog(t('logFail', { target: err.payload?.command || payload.branch }), stderr);
       const confirmed = await showConfirm({
         title: t('clobberConfirmTitle'),
@@ -864,10 +893,7 @@ async function switchWorktreeWithClobberPrompt(payload) {
         danger: true,
       });
       if (confirmed) {
-        return api('/api/worktrees/switch', {
-          method: 'POST',
-          body: JSON.stringify({ ...payload, clobber: true }),
-        });
+        return apiWithHookApproval('/api/worktrees/switch', { ...payload, clobber: true });
       }
       err.clobberCancelled = true;
     }
@@ -875,10 +901,11 @@ async function switchWorktreeWithClobberPrompt(payload) {
   }
 }
 
-async function openWorktreeRow(branch, shouldCreate, base = '', explicitToolId = '') {
+async function openWorktreeRow(branch, shouldCreate, base = '', explicitToolId = '', displayLabel = '') {
   const active = getActiveProject();
   if (!active) return;
-  const toolId = explicitToolId || getWorktreeTool(branch)?.id || 'claude';
+  const label = displayLabel || branch;
+  const toolId = explicitToolId || getWorktreeTool(label)?.id || getWorktreeTool(branch)?.id || 'claude';
   try {
     const res = await switchWorktreeWithClobberPrompt({
       projectId: active.id,
@@ -891,13 +918,17 @@ async function openWorktreeRow(branch, shouldCreate, base = '', explicitToolId =
       active.worktreeTools = res.worktreeTools;
     }
     appendLog(t('logExec', { cmd: res.command }), res.stdout || res.stderr || t('openedFallback'));
-    showToast(t('openedWorktreeToast', { branch }), 'success');
+    showToast(t('openedWorktreeToast', { branch: label }), 'success');
     await refreshWorktrees();
   } catch (err) {
-    if (!err.clobberCancelled) {
-      appendLog(t('logFail', { target: err.payload?.command || branch }), err.payload?.stderr || err.message);
+    if (!err.clobberCancelled && !err.approvalCancelled) {
+      appendLog(t('logFail', { target: err.payload?.command || label }), err.payload?.stderr || err.message);
     }
-    showToast(err.payload?.stderr || err.message, 'error');
+    if (!err.approvalCancelled) {
+      showToast(err.payload?.stderr || err.message, 'error');
+    } else {
+      showToast(err.message, 'info');
+    }
   }
 }
 
@@ -1016,8 +1047,24 @@ function populateMergeTargetSelect(sourceBranch) {
 
 function getMergeableWorktreeBranches(targetBranch = '') {
   const items = state.worktreeData?.items || [];
+  const defaultBranch = state.worktreeData?.repo?.default_branch || 'main';
+  const targetIsDefault = !targetBranch || targetBranch === defaultBranch;
   return items
-    .filter((item) => item.worktree && !item.worktree.main && item.branch && item.branch !== targetBranch)
+    .filter((item) => {
+      const wt = item.worktree;
+      if (!wt || wt.main || !item.branch || item.branch === targetBranch) return false;
+      if (wt.locked || wt.prunable || wt.changes?.conflicted || wt.operation) return false;
+      const db = item.default_branch;
+      if (db?.orphan) return false;
+      if (targetIsDefault && db) {
+        const ch = wt.changes || {};
+        const hasDirty = Boolean(ch.staged || ch.modified || ch.untracked || ch.renamed || ch.deleted);
+        if (!hasDirty && (db.ahead === 0 || (db.integration && !db.ahead))) {
+          return false;
+        }
+      }
+      return true;
+    })
     .map((item) => item.branch);
 }
 
@@ -1077,15 +1124,19 @@ async function confirmMerge() {
   if (!state.mergeAllMode) {
     btn.disabled = true;
     try {
-      const res = await api('/api/worktrees/merge', {
-        method: 'POST',
-        body: JSON.stringify({ ...commonOptions, branch: state.mergeTargetBranch }),
+      const res = await apiWithHookApproval('/api/worktrees/merge', {
+        ...commonOptions,
+        branch: state.mergeTargetBranch,
       });
       appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
       showToast(t('mergeSuccessToast', { branch: state.mergeTargetBranch }), 'success');
       closeModal('modal-merge');
       await refreshWorktrees();
     } catch (err) {
+      if (err.approvalCancelled) {
+        showToast(err.message, 'info');
+        return;
+      }
       appendLog(t('mergeFailLog', { cmd: err.payload?.command || '' }), err.payload?.stderr || err.message);
       if (err.payload?.hasConflicts && err.payload?.conflictSession) {
         closeModal('modal-merge');
@@ -1110,23 +1161,27 @@ async function confirmMerge() {
 
   btn.disabled = true;
   let done = 0;
+  let batchApproveHooks = false;
   try {
     for (let i = 0; i < branches.length; i += 1) {
       const branch = branches[i];
       const isLast = i === branches.length - 1;
       btn.textContent = t('mergingProgressBtn', { done: done + 1, total: branches.length });
       try {
-        const res = await api('/api/worktrees/merge', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...commonOptions,
-            branch,
-            autoPush: autoPush && isLast,
-          }),
+        const res = await apiWithHookApproval('/api/worktrees/merge', {
+          ...commonOptions,
+          branch,
+          approveHooks: batchApproveHooks,
+          autoPush: autoPush && isLast,
         });
+        if (res.hookApproved) batchApproveHooks = true;
         done += 1;
         appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
       } catch (err) {
+        if (err.approvalCancelled) {
+          showToast(err.message, 'info');
+          return;
+        }
         const msg = err.payload?.stderr || err.message;
         appendLog(t('mergeFailLog', { cmd: err.payload?.command || branch }), msg);
         if (err.payload?.hasConflicts && err.payload?.conflictSession) {
@@ -1159,6 +1214,8 @@ async function openConflictModal(session) {
     workDir: session.workDir,
     sourceBranch: session.sourceBranch || '',
     targetBranch: session.targetBranch || '',
+    operation: session.operation || null,
+    wtMergeOptions: session.wtMergeOptions || null,
     autoPush,
     files,
     trackedFiles,
@@ -1190,6 +1247,7 @@ async function openExistingWorktreeConflictModal(workDir, branchName) {
       workDir: res.status.workDir,
       sourceBranch: '',
       targetBranch: branchName,
+      operation: res.status.operation || null,
       autoPush: false,
       files: res.status.files,
     });
@@ -1197,6 +1255,14 @@ async function openExistingWorktreeConflictModal(workDir, branchName) {
     showToast(err.message, 'error');
   }
 }
+
+const ABORT_BTN_KEY_BY_OP = {
+  rebase: 'abortRebaseBtn',
+  merge: 'abortMergeBtn',
+  cherry_pick: 'abortCherryPickBtn',
+  revert: 'abortRevertBtn',
+  bisect: 'abortBisectBtn',
+};
 
 function renderConflictHeaderAndSidebar() {
   const cs = state.conflictSession;
@@ -1220,9 +1286,16 @@ function renderConflictHeaderAndSidebar() {
     }
   }
 
+  const abortBtn = $('btn-abort-conflict');
+  if (abortBtn) {
+    abortBtn.textContent = t(ABORT_BTN_KEY_BY_OP[cs.operation] || 'abortMergeBtn');
+  }
+
   const completeBtn = $('btn-complete-conflict');
   if (completeBtn) {
     completeBtn.disabled = cs.unresolvedCount > 0;
+    completeBtn.textContent =
+      cs.operation === 'rebase' && cs.wtMergeOptions ? t('completeRebaseAndMergeBtn') : t('completeMergeBtn');
   }
   const aiCompleteBtn = $('btn-ai-complete-conflict');
   if (aiCompleteBtn) {
@@ -2024,6 +2097,7 @@ async function completeConflictResolution() {
         workDir: cs.workDir,
         sourceBranch: cs.sourceBranch,
         targetBranch: cs.targetBranch,
+        wtMergeOptions: cs.wtMergeOptions || null,
         autoPush: Boolean($('conflict-auto-push')?.checked ?? cs.autoPush),
       }),
     });
@@ -2035,8 +2109,26 @@ async function completeConflictResolution() {
   } catch (err) {
     const msg = err.payload?.stderr || err.message;
     appendLog(t('mergeFailLog', { cmd: err.payload?.command || '' }), msg);
-    showToast(t('mergeFailToast', { msg }), 'error');
-    if (btn && cs.unresolvedCount === 0) btn.disabled = false;
+    if (err.payload?.hasMoreConflicts && err.payload?.status) {
+      const nextStatus = err.payload.status;
+      cs.files = nextStatus.files || [];
+      cs.trackedFiles = cs.files.map((f) => f.path);
+      cs.unresolvedCount = nextStatus.unresolvedCount ?? cs.files.filter((f) => !f.resolved).length;
+      cs.operation = nextStatus.operation || cs.operation;
+      cs.activeFile = cs.files.find((f) => !f.resolved)?.path || cs.files[0]?.path || '';
+      cs.fileDetails = null;
+      renderConflictHeaderAndSidebar();
+      if (cs.activeFile) {
+        await loadConflictFile(cs.activeFile);
+      } else {
+        renderConflictMainPane();
+      }
+      showToast(t('rebaseNextConflictToast'), 'info');
+      await refreshWorktrees();
+    } else {
+      showToast(t('mergeFailToast', { msg }), 'error');
+      if (btn && cs.unresolvedCount === 0) btn.disabled = false;
+    }
   }
 }
 
@@ -2165,6 +2257,7 @@ async function aiCompleteConflictResolution() {
         workDir: cs.workDir,
         sourceBranch: cs.sourceBranch,
         targetBranch: cs.targetBranch,
+        wtMergeOptions: cs.wtMergeOptions || null,
         autoPush: Boolean($('conflict-auto-push')?.checked ?? cs.autoPush),
         trackedFiles: cs.trackedFiles,
         stream: true,
@@ -2275,13 +2368,22 @@ async function aiCompleteConflictResolution() {
     appendAiProgressStep(t('aiProgressStepFail', { msg }), 'error');
     finishAiProgressModal(false);
     appendLog(t('mergeFailLog', { cmd: err.payload?.command || 'AI Merge' }), msg);
-    showToast(t('mergeFailToast', { msg }), 'error');
+    showToast(err.payload?.hasMoreConflicts ? t('rebaseNextConflictToast') : t('mergeFailToast', { msg }), err.payload?.hasMoreConflicts ? 'info' : 'error');
     if (err.payload?.status && state.conflictSession) {
-      state.conflictSession.files = err.payload.status.files;
-      state.conflictSession.unresolvedCount = err.payload.status.unresolvedCount;
+      const nextStatus = err.payload.status;
+      state.conflictSession.files = nextStatus.files || [];
+      state.conflictSession.trackedFiles = state.conflictSession.files.map((f) => f.path);
+      state.conflictSession.unresolvedCount = nextStatus.unresolvedCount ?? 0;
+      state.conflictSession.operation = nextStatus.operation || state.conflictSession.operation;
+      if (!state.conflictSession.files.some((f) => f.path === state.conflictSession.activeFile)) {
+        state.conflictSession.activeFile = state.conflictSession.files[0]?.path || '';
+      }
       renderConflictHeaderAndSidebar();
       if (state.conflictSession.activeFile) {
         await loadConflictFile(state.conflictSession.activeFile);
+      } else {
+        state.conflictSession.fileDetails = null;
+        renderConflictMainPane();
       }
     }
   } finally {
@@ -2324,48 +2426,127 @@ async function abortConflictResolution() {
   }
 }
 
-async function removeWorktreeRow(branch) {
+async function removeWorktreeRow(branch, item = null) {
   const active = getActiveProject();
   if (!active) return;
+
+  const lockInfo = item?.worktree?.locked;
+  if (lockInfo) {
+    const reasonSuffix = lockInfo.reason ? ` (${lockInfo.reason})` : '';
+    showToast(t('removeLockedWarn', { reason: reasonSuffix }), 'error');
+    return;
+  }
+
   const confirmed = await showConfirm({
     title: t('removeWorktreeConfirmTitle'),
     message: t('removeWorktreeConfirm', { branch }),
     danger: true,
   });
   if (!confirmed) return;
-  try {
-    const res = await api('/api/worktrees/remove', {
-      method: 'POST',
-      body: JSON.stringify({ projectId: active.id, branch }),
+
+  const runRemoveStep = async (opts = {}) =>
+    apiWithHookApproval('/api/worktrees/remove', {
+      projectId: active.id,
+      branch,
+      ...opts,
     });
-    const outcome = Array.isArray(res.data) ? res.data[0]?.branch_outcome : res.data?.branch_outcome;
-    if (outcome === 'retained_unmerged' || outcome === 'retained_failed') {
-      const err = new Error(res.stderr || outcome);
-      err.payload = { command: res.command, stderr: res.stderr || outcome };
-      throw err;
+
+  const handleBranchOutcome = async (res, alreadyApproved = false) => {
+    const itemResult = Array.isArray(res.data) ? res.data[0] : res.data;
+    const outcome = itemResult?.branch_outcome;
+
+    if (outcome === 'retained_checked_out') {
+      appendLog(t('removeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
+      showToast(t('removeCheckedOutWarn', { path: itemResult?.branch_checked_out_at || '-' }), 'info');
+      await refreshWorktrees();
+      return true;
     }
+
+    if (outcome === 'retained_raced') {
+      const retry = await showConfirm({
+        title: t('removeWorktreeConfirmTitle'),
+        message: t('removeRacedConfirm'),
+      });
+      if (!retry) {
+        await refreshWorktrees();
+        return true;
+      }
+      const resRetry = await runRemoveStep({ approveHooks: alreadyApproved });
+      return handleBranchOutcome(resRetry, alreadyApproved || resRetry.hookApproved);
+    }
+
+    if (outcome === 'retained_unmerged' || outcome === 'retained_failed') {
+      const detail = res.stderr || res.stdout || outcome;
+      appendLog(t('removeFailLog', { cmd: res.command }), detail);
+      const confirmForceDel = await showConfirm({
+        title: t('forceDeleteBranchConfirmTitle'),
+        message: t('forceDeleteBranchConfirm', { stderr: detail }),
+        danger: true,
+      });
+      if (!confirmForceDel) {
+        await refreshWorktrees();
+        return true;
+      }
+      const resDel = await runRemoveStep({ forceDelete: true, approveHooks: alreadyApproved });
+      appendLog(t('forceRemoveSuccessLog', { cmd: resDel.command }), resDel.stdout || resDel.stderr);
+      showToast(t('forceRemovedToast', { branch }), 'success');
+      await refreshWorktrees();
+      return true;
+    }
+
     appendLog(t('removeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
     showToast(t('removedToast', { branch }), 'success');
     await refreshWorktrees();
+    return true;
+  };
+
+  try {
+    const res = await runRemoveStep();
+    await handleBranchOutcome(res, Boolean(res.hookApproved));
   } catch (err) {
+    if (err.approvalCancelled) {
+      showToast(err.message, 'info');
+      return;
+    }
     const stderr = err.payload?.stderr || err.message;
     appendLog(t('removeFailLog', { cmd: err.payload?.command || '' }), stderr);
-    const force = await showConfirm({
-      title: t('forceRemoveConfirmTitle'),
-      message: t('forceRemoveConfirm', { stderr }),
+
+    if (/locked/i.test(stderr)) {
+      showToast(t('removeLockedWarn', { reason: '' }), 'error');
+      return;
+    }
+
+    const isUnmergedErr = /not fully merged|unmerged|use -D/i.test(stderr);
+    const isDirtyErr = /uncommitted|untracked|modified|dirty|changes|--force/i.test(stderr);
+    const confirmForce = await showConfirm({
+      title: isUnmergedErr ? t('forceDeleteBranchConfirmTitle') : t('forceRemoveConfirmTitle'),
+      message: isUnmergedErr
+        ? t('forceDeleteBranchConfirm', { stderr })
+        : isDirtyErr
+          ? t('forceRemoveDirtyConfirm', { stderr })
+          : t('forceRemoveConfirm', { stderr }),
       danger: true,
     });
-    if (!force) return;
+    if (!confirmForce) return;
+
     try {
-      const res2 = await api('/api/worktrees/remove', {
-        method: 'POST',
-        body: JSON.stringify({ projectId: active.id, branch, force: true, forceDelete: true }),
-      });
+      const retryOpts = isUnmergedErr ? { forceDelete: true } : { force: true };
+      const res2 = await runRemoveStep(retryOpts);
+      const itemResult2 = Array.isArray(res2.data) ? res2.data[0] : res2.data;
+      const outcome2 = itemResult2?.branch_outcome;
+      if (!isUnmergedErr && (outcome2 === 'retained_unmerged' || outcome2 === 'retained_failed')) {
+        await handleBranchOutcome(res2, Boolean(res2.hookApproved));
+        return;
+      }
       appendLog(t('forceRemoveSuccessLog', { cmd: res2.command }), res2.stdout || res2.stderr);
       showToast(t('forceRemovedToast', { branch }), 'success');
       await refreshWorktrees();
     } catch (err2) {
-      showToast(err2.payload?.stderr || err2.message, 'error');
+      if (err2.approvalCancelled) {
+        showToast(err2.message, 'info');
+      } else {
+        showToast(err2.payload?.stderr || err2.message, 'error');
+      }
     }
   }
 }
@@ -2789,14 +2970,6 @@ function bindEvents() {
   $('btn-merge-all').addEventListener('click', openMergeAllModal);
   $('toggle-branches').addEventListener('change', refreshWorktrees);
 
-  $('select-tool').addEventListener('change', () => {
-    updateCommandPreview();
-  });
-
-  $('input-base').addEventListener('change', () => {
-    updateCommandPreview();
-  });
-
   $('switch-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const active = getActiveProject();
@@ -2821,13 +2994,12 @@ function bindEvents() {
       }
       appendLog(t('logExec', { cmd: res.command }), res.stdout || res.stderr || t('worktreePathLog', { path: res.worktreePath }));
       showToast(t('worktreeReadyToast'), 'success');
-      updateCommandPreview();
       await refreshWorktrees();
     } catch (err) {
-      if (!err.clobberCancelled) {
+      if (!err.clobberCancelled && !err.approvalCancelled) {
         appendLog(t('logFail', { target: err.payload?.command || '' }), err.payload?.stderr || err.message);
       }
-      showToast(err.payload?.stderr || err.message, 'error');
+      showToast(err.approvalCancelled ? err.message : err.payload?.stderr || err.message, err.approvalCancelled ? 'info' : 'error');
     } finally {
       btn.disabled = false;
     }

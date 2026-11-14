@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { getWorktreeInProgressOp, pushWorktreeBranch, runGit } from './remote.js';
+import { buildWtMergeArgs, runWt } from './wt-resolver.js';
 
 /**
  * Ensure a relative file path stays strictly inside `workDir`.
@@ -189,7 +190,10 @@ export function applyHunkResolution(content, hunkIndex, choice) {
  * @param {string[]} [trackedFiles] Optional list of files from the initial conflict to keep showing even after resolved
  */
 export async function getConflictStatus(workDir, trackedFiles = []) {
-  const unmergedRes = await runGit(workDir, ['diff', '--name-only', '--diff-filter=U'], { timeout: 10_000 });
+  const [unmergedRes, operation] = await Promise.all([
+    runGit(workDir, ['diff', '--name-only', '--diff-filter=U'], { timeout: 10_000 }),
+    getWorktreeInProgressOp(workDir),
+  ]);
   const unmergedFiles = unmergedRes.stdout
     .split(/\r?\n/)
     .map((s) => s.trim())
@@ -218,6 +222,7 @@ export async function getConflictStatus(workDir, trackedFiles = []) {
 
   return {
     workDir: resolve(workDir),
+    operation,
     unresolvedCount: unmergedFiles.length,
     unmergedFiles,
     files,
@@ -314,28 +319,53 @@ export async function resolveConflictFile(workDir, options) {
   };
 }
 
+const ABORT_ARGS_BY_OP = {
+  rebase: ['rebase', '--abort'],
+  merge: ['merge', '--abort'],
+  cherry_pick: ['cherry-pick', '--abort'],
+  revert: ['revert', '--abort'],
+  bisect: ['bisect', 'reset'],
+};
+
+const CONTINUE_ARGS_BY_OP = {
+  rebase: ['-c', 'core.editor=true', 'rebase', '--continue'],
+  cherry_pick: ['-c', 'core.editor=true', 'cherry-pick', '--continue'],
+  revert: ['-c', 'core.editor=true', 'revert', '--continue'],
+};
+
 /**
- * Abort an in-progress merge, rebase, or squash merge in `workDir`.
+ * Abort an in-progress rebase, merge, cherry-pick, revert, or bisect in `workDir`.
  * @param {string} workDir
  */
 export async function abortConflictMerge(workDir) {
+  const op = await getWorktreeInProgressOp(workDir);
+  if (op && ABORT_ARGS_BY_OP[op]) {
+    const opAbort = await runGit(workDir, ABORT_ARGS_BY_OP[op], { timeout: 15_000 });
+    if (opAbort.ok) return { ...opAbort, operation: op };
+  }
+
   const mergeAbort = await runGit(workDir, ['merge', '--abort'], { timeout: 15_000 });
-  if (mergeAbort.ok) return mergeAbort;
+  if (mergeAbort.ok) return { ...mergeAbort, operation: op || 'merge' };
 
   const rebaseAbort = await runGit(workDir, ['rebase', '--abort'], { timeout: 15_000 });
-  if (rebaseAbort.ok) return rebaseAbort;
+  if (rebaseAbort.ok) return { ...rebaseAbort, operation: op || 'rebase' };
 
   const resetMerge = await runGit(workDir, ['reset', '--merge'], { timeout: 15_000 });
-  return resetMerge;
+  return { ...resetMerge, operation: op || null };
 }
 
 /**
- * Complete an in-progress merge after all conflicts have been resolved and staged.
+ * Complete an in-progress conflict operation after conflicts have been resolved and staged.
+ * When originating from `wt merge` (`options.wtMergeOptions`), resumes the `wt merge` pipeline
+ * (hooks, fast-forward merge, worktree cleanup) after the source rebase finishes.
  * @param {string} workDir
  * @param {{
  *   sourceBranch?: string,
  *   targetBranch?: string,
  *   autoPush?: boolean,
+ *   wtBin?: string,
+ *   repoPath?: string,
+ *   wtMergeOptions?: Record<string, any> | null,
  * }} [options]
  */
 export async function completeConflictMerge(workDir, options = {}) {
@@ -350,18 +380,25 @@ export async function completeConflictMerge(workDir, options = {}) {
     return res;
   };
 
-  // Check if rebase, merge, or staged changes need to be finalized
+  // Check if rebase, cherry-pick, revert, merge, or staged changes need to be finalized
   const [inProgressOp, statusPorcelain] = await Promise.all([
     getWorktreeInProgressOp(workDir),
     runGit(workDir, ['status', '--porcelain'], { timeout: 5_000 }),
   ]);
 
-  if (inProgressOp === 'rebase') {
-    const rebaseCont = recordStep(
-      await runGit(workDir, ['-c', 'core.editor=true', 'rebase', '--continue'], { timeout: 30_000 })
+  if (inProgressOp && CONTINUE_ARGS_BY_OP[inProgressOp]) {
+    const contRes = recordStep(
+      await runGit(workDir, CONTINUE_ARGS_BY_OP[inProgressOp], {
+        timeout: 30_000,
+        env: { GIT_EDITOR: 'true' },
+      })
     );
-    if (!rebaseCont.ok) {
-      return buildStepsResult(false, steps);
+    if (!contRes.ok) {
+      const nextStatus = await getConflictStatus(workDir);
+      return buildStepsResult(false, steps, {
+        hasMoreConflicts: nextStatus.unresolvedCount > 0,
+        status: nextStatus,
+      });
     }
   } else if (inProgressOp === 'merge' || statusPorcelain.stdout.trim()) {
     const commitMsg = options.sourceBranch
@@ -378,22 +415,49 @@ export async function completeConflictMerge(workDir, options = {}) {
     }
   }
 
-  let targetBranch = String(options.targetBranch || '').trim();
+  // After source rebase finishes, resume the full `wt merge` pipeline (pre-merge, merge, remove, post-merge)
+  const wtMergeOpts = options.wtMergeOptions;
+  let didWtMerge = false;
+  if (options.wtBin && options.repoPath && wtMergeOpts?.branch) {
+    const remainingOp = await getWorktreeInProgressOp(workDir);
+    if (remainingOp) {
+      const nextStatus = await getConflictStatus(workDir);
+      return buildStepsResult(false, steps, {
+        hasMoreConflicts: true,
+        status: nextStatus,
+      });
+    }
+    const wtRes = recordStep(
+      await runWt(options.wtBin, options.repoPath, buildWtMergeArgs(wtMergeOpts, { includeYes: true }), {
+        timeout: 120_000,
+      })
+    );
+    if (!wtRes.ok) {
+      return buildStepsResult(false, steps);
+    }
+    didWtMerge = true;
+  }
+
+  let targetBranch = String(options.targetBranch || wtMergeOpts?.target || '').trim();
   if (!targetBranch) {
-    const revRes = await runGit(workDir, ['rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 5_000 });
+    const revRes = await runGit(didWtMerge && options.repoPath ? options.repoPath : workDir, ['rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 5_000 });
     targetBranch = revRes.stdout.trim();
   }
 
   if (options.autoPush && targetBranch) {
+    const pushRepo = didWtMerge && options.repoPath ? options.repoPath : workDir;
     const pushRes = recordStep(
-      await pushWorktreeBranch(workDir, { workDir, branch: targetBranch })
+      await pushWorktreeBranch(pushRepo, {
+        ...(didWtMerge ? {} : { workDir }),
+        branch: targetBranch,
+      })
     );
     if (!pushRes.ok) {
       return buildStepsResult(false, steps);
     }
   }
 
-  return buildStepsResult(true, steps);
+  return buildStepsResult(true, steps, { resumedWtMerge: didWtMerge });
 }
 
 function buildStepsResult(ok, steps, extra = {}) {
@@ -714,6 +778,9 @@ export async function resolveFileWithAi(fileContent, options) {
  *   sourceBranch?: string,
  *   targetBranch?: string,
  *   autoPush?: boolean,
+ *   wtBin?: string,
+ *   repoPath?: string,
+ *   wtMergeOptions?: Record<string, any> | null,
  *   trackedFiles?: string[],
  *   aiConfig?: { url: string, key: string, model: string },
  *   onProgress?: (event: Record<string, any>) => void,
@@ -794,9 +861,16 @@ export async function aiResolveAndCompleteConflictMerge(workDir, options = {}) {
     sourceBranch: options.sourceBranch,
     targetBranch: options.targetBranch,
     autoPush: options.autoPush,
+    wtBin: options.wtBin,
+    repoPath: options.repoPath,
+    wtMergeOptions: options.wtMergeOptions,
   });
 
-  const finalStatus = await getConflictStatus(workDir, initialStatus.files.map((f) => f.path));
+  const finalStatus =
+    completeRes.status ||
+    (existsSync(workDir)
+      ? await getConflictStatus(workDir, initialStatus.files.map((f) => f.path))
+      : { workDir, operation: null, unresolvedCount: 0, unmergedFiles: [], files: [] });
   return {
     ...completeRes,
     resolvedFiles,

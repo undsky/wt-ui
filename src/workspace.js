@@ -93,10 +93,18 @@ export function stripJsonc(input) {
   return cleaned;
 }
 
+function isBareRepoDirSync(dirPath) {
+  return (
+    existsSync(resolve(dirPath, 'HEAD')) &&
+    existsSync(resolve(dirPath, 'objects')) &&
+    existsSync(resolve(dirPath, 'refs'))
+  );
+}
+
 /**
- * Check whether a directory is inside a Git repository and return its top-level root.
+ * Check whether a directory is inside a Git repository (worktree or bare repo) and return its root.
  * @param {string} dirPath
- * @returns {Promise<{ isGitRepo: boolean, rootPath: string | null }>}
+ * @returns {Promise<{ isGitRepo: boolean, rootPath: string | null, isBare?: boolean }>}
  */
 export async function inspectGitRepo(dirPath) {
   if (!dirPath || !existsSync(dirPath)) {
@@ -112,18 +120,36 @@ export async function inspectGitRepo(dirPath) {
   }
 
   try {
+    const { stdout: bareOut } = await execFileAsync('git', ['-C', dirPath, 'rev-parse', '--is-bare-repository'], {
+      timeout: 3000,
+      windowsHide: true,
+    });
+    if (bareOut.trim() === 'true') {
+      const { stdout: gitDirOut } = await execFileAsync('git', ['-C', dirPath, 'rev-parse', '--absolute-git-dir'], {
+        timeout: 3000,
+        windowsHide: true,
+      });
+      const bareRoot = gitDirOut.trim();
+      if (bareRoot) {
+        return { isGitRepo: true, rootPath: resolve(bareRoot), isBare: true };
+      }
+    }
+
     const { stdout } = await execFileAsync('git', ['-C', dirPath, 'rev-parse', '--show-toplevel'], {
       timeout: 3000,
       windowsHide: true,
     });
     const rootPath = stdout.trim();
     if (rootPath) {
-      return { isGitRepo: true, rootPath: resolve(rootPath) };
+      return { isGitRepo: true, rootPath: resolve(rootPath), isBare: false };
     }
   } catch {
-    // Fall back to checking .git existence in case git is unavailable or bare
+    // Fall back to filesystem markers in case git is unavailable
     if (existsSync(resolve(dirPath, '.git'))) {
-      return { isGitRepo: true, rootPath: resolve(dirPath) };
+      return { isGitRepo: true, rootPath: resolve(dirPath), isBare: false };
+    }
+    if (isBareRepoDirSync(dirPath)) {
+      return { isGitRepo: true, rootPath: resolve(dirPath), isBare: true };
     }
   }
 
@@ -218,7 +244,7 @@ export function browsePath(targetPath) {
       if (dirent.isDirectory()) {
         let isGitRepo = false;
         try {
-          isGitRepo = existsSync(resolve(fullPath, '.git'));
+          isGitRepo = existsSync(resolve(fullPath, '.git')) || isBareRepoDirSync(fullPath);
         } catch {
           isGitRepo = false;
         }

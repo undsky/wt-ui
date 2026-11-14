@@ -269,7 +269,7 @@ async function checkEnvironmentUncached(options = {}) {
  * @param {string} wtBin
  * @param {string} repoPath
  * @param {string[]} args
- * @param {{ timeout?: number }} [options]
+ * @param {{ timeout?: number, env?: Record<string, string | undefined> }} [options]
  */
 export async function runWt(wtBin, repoPath, args, options = {}) {
   const fullArgs = repoPath ? ['-C', repoPath, ...args] : [...args];
@@ -278,6 +278,8 @@ export async function runWt(wtBin, repoPath, args, options = {}) {
       timeout: options.timeout ?? 60_000,
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true,
+      // Disable ANSI color escapes even when parent env sets CLICOLOR_FORCE
+      env: { ...process.env, ...(options.env || {}), NO_COLOR: '1' },
     });
     return {
       ok: true,
@@ -298,6 +300,69 @@ export async function runWt(wtBin, repoPath, args, options = {}) {
 }
 
 /**
+ * Inspect Worktrunk project hook command approval state without mutating `approvals.toml`.
+ * @param {string} wtBin
+ * @param {string} repoPath
+ */
+export async function checkProjectApprovals(wtBin, repoPath) {
+  const res = await runWt(wtBin, repoPath, ['config', 'approvals', 'list', '--format=json'], {
+    timeout: 10_000,
+  });
+  const json = parseWtJson(res.stdout);
+  if (!res.ok || !json || typeof json.state !== 'string') {
+    return {
+      supported: false,
+      state: 'unknown',
+      commands: [],
+      unapproved: [],
+    };
+  }
+  const commands = Array.isArray(json.commands) ? json.commands : [];
+  return {
+    supported: true,
+    state: json.state,
+    commands,
+    unapproved: commands.filter((cmd) => cmd && cmd.approved === false),
+  };
+}
+
+/**
+ * Check whether an automated `wt` operation requires explicit user approval for project hooks.
+ * @param {{
+ *   wtBin: string,
+ *   repoPath: string,
+ *   approveHooks?: boolean,
+ *   skipHooks?: boolean,
+ *   phases?: string[],
+ * }} options
+ */
+export async function resolveApprovalGate({ wtBin, repoPath, approveHooks = false, skipHooks = false, phases = [] }) {
+  if (skipHooks || approveHooks) {
+    return { allowed: true, passYes: true, unapprovedCommands: [] };
+  }
+
+  const approvals = await checkProjectApprovals(wtBin, repoPath);
+  if (!approvals.supported || approvals.state !== 'approval_required') {
+    return { allowed: true, passYes: true, unapprovedCommands: [] };
+  }
+
+  const relevant =
+    phases.length > 0
+      ? approvals.unapproved.filter((cmd) => !cmd.phase || phases.includes(cmd.phase))
+      : approvals.unapproved;
+
+  if (relevant.length === 0) {
+    return { allowed: true, passYes: true, unapprovedCommands: [] };
+  }
+
+  return {
+    allowed: false,
+    passYes: false,
+    unapprovedCommands: relevant,
+  };
+}
+
+/**
  * Parse JSON from `wt ... --format=json` stdout.
  * @param {string} stdout
  */
@@ -309,6 +374,32 @@ export function parseWtJson(stdout) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Build deterministic `wt merge` CLI arguments so UI checkboxes override any user `[merge]` config.
+ * @param {Record<string, any>} opts
+ * @param {{ includeYes?: boolean }} [flags]
+ */
+export function buildWtMergeArgs(opts = {}, { includeYes = true } = {}) {
+  const args = ['merge'];
+  if (opts.target) args.push(String(opts.target).trim());
+  args.push('--branch', String(opts.branch).trim());
+  args.push('--config-set', `merge.squash=${opts.noSquash ? 'false' : 'true'}`);
+  args.push('--config-set', `merge.commit=${opts.noCommit ? 'false' : 'true'}`);
+  args.push('--config-set', `merge.rebase=${opts.noRebase ? 'false' : 'true'}`);
+  args.push('--config-set', `merge.remove=${opts.noRemove ? 'false' : 'true'}`);
+  args.push('--config-set', `merge.ff=${opts.noFf ? 'false' : 'true'}`);
+  args.push('--config-set', `merge.verify=${opts.noHooks ? 'false' : 'true'}`);
+  if (opts.noSquash) args.push('--no-squash');
+  if (opts.noCommit) args.push('--no-commit');
+  if (opts.noRebase) args.push('--no-rebase');
+  if (opts.noRemove) args.push('--no-remove');
+  if (opts.noFf) args.push('--no-ff');
+  if (opts.noHooks) args.push('--no-hooks');
+  args.push('--format=json');
+  if (includeYes) args.push('-y');
+  return args;
 }
 
 /**

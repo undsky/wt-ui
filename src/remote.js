@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { formatCommand } from './wt-resolver.js';
+import { formatCommand, runWt } from './wt-resolver.js';
 import { getConflictStatus } from './conflict.js';
 import { samePath } from './store.js';
 
@@ -12,7 +12,7 @@ const execFileAsync = promisify(execFile);
  * Run a git command in the given directory and return structured output.
  * @param {string} cwd
  * @param {string[]} args
- * @param {{ timeout?: number }} [options]
+ * @param {{ timeout?: number, env?: Record<string, string | undefined> }} [options]
  */
 export async function runGit(cwd, args, options = {}) {
   const fullArgs = cwd ? ['-C', cwd, ...args] : [...args];
@@ -21,6 +21,7 @@ export async function runGit(cwd, args, options = {}) {
       timeout: options.timeout ?? 60_000,
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true,
+      ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
     });
     return {
       ok: true,
@@ -41,7 +42,8 @@ export async function runGit(cwd, args, options = {}) {
 }
 
 /**
- * Parse `git worktree list --porcelain` to map local branches to worktree paths.
+ * Parse `git worktree list --porcelain` to map checked-out branches to worktree paths.
+ * Skips bare repository entries since they have no working tree checkout.
  * @param {string} repoPath
  * @returns {Promise<Array<{ path: string, head: string, branch: string | null, isMain: boolean }>>}
  */
@@ -51,11 +53,12 @@ export async function listGitWorktrees(repoPath) {
 
   const worktrees = [];
   const blocks = res.stdout.trim().split(/\r?\n\r?\n/);
-  blocks.forEach((block, idx) => {
+  for (const block of blocks) {
     const lines = block.split(/\r?\n/);
     let wtPath = '';
     let head = '';
     let branch = null;
+    let isBare = false;
     for (const line of lines) {
       if (line.startsWith('worktree ')) {
         wtPath = resolve(line.slice('worktree '.length).trim());
@@ -64,26 +67,35 @@ export async function listGitWorktrees(repoPath) {
       } else if (line.startsWith('branch ')) {
         const ref = line.slice('branch '.length).trim();
         branch = ref.replace(/^refs\/heads\//, '');
+      } else if (line.trim() === 'bare') {
+        isBare = true;
       }
     }
-    if (wtPath) {
+    if (wtPath && !isBare) {
       worktrees.push({
         path: wtPath,
         head,
         branch,
-        isMain: idx === 0,
+        isMain: worktrees.length === 0,
       });
     }
-  });
+  }
   return worktrees;
 }
 
 /**
- * Detect the default branch of a repository (e.g. main or master).
+ * Detect the default branch of a repository via Worktrunk state first, falling back to Git heuristics.
  * @param {string} repoPath
  * @param {string[]} localBranches
+ * @param {string} [wtBin]
  */
-async function detectDefaultBranch(repoPath, localBranches) {
+async function detectDefaultBranch(repoPath, localBranches, wtBin = '') {
+  if (wtBin) {
+    const wtRes = await runWt(wtBin, repoPath, ['config', 'state', 'default-branch'], { timeout: 5_000 });
+    const detected = wtRes.ok ? wtRes.stdout.trim().split(/\r?\n/)[0]?.trim() : '';
+    if (detected) return detected;
+  }
+
   const symRef = await runGit(repoPath, ['symbolic-ref', 'refs/remotes/origin/HEAD'], { timeout: 5_000 });
   if (symRef.ok) {
     const cleaned = symRef.stdout.trim().replace(/^refs\/remotes\/origin\//, '');
@@ -101,29 +113,33 @@ async function detectDefaultBranch(repoPath, localBranches) {
   return localBranches[0] || 'main';
 }
 
+const GIT_OP_PATHS = [
+  ['rebase-merge', 'rebase'],
+  ['rebase-apply', 'rebase'],
+  ['MERGE_HEAD', 'merge'],
+  ['CHERRY_PICK_HEAD', 'cherry_pick'],
+  ['REVERT_HEAD', 'revert'],
+  ['BISECT_LOG', 'bisect'],
+];
+
 /**
- * Detect whether a worktree currently has an active in-progress rebase or merge operation.
+ * Detect whether a worktree currently has an active in-progress Git operation.
  * Checks `rebase-merge` / `rebase-apply` directories rather than `REBASE_HEAD` alone,
  * because Git/tools can leave a stale `REBASE_HEAD` behind after a rebase finishes.
  * @param {string} workDir
- * @returns {Promise<'rebase' | 'merge' | null>}
+ * @returns {Promise<'rebase' | 'merge' | 'cherry_pick' | 'revert' | 'bisect' | null>}
  */
 export async function getWorktreeInProgressOp(workDir) {
   if (!workDir) return null;
-  const res = await runGit(
-    workDir,
-    ['rev-parse', '--git-path', 'rebase-merge', '--git-path', 'rebase-apply', '--git-path', 'MERGE_HEAD'],
-    { timeout: 5_000 }
-  );
+  const args = ['rev-parse', ...GIT_OP_PATHS.flatMap(([name]) => ['--git-path', name])];
+  const res = await runGit(workDir, args, { timeout: 5_000 });
   if (!res.ok) return null;
-  const [rebaseMergeRel, rebaseApplyRel, mergeHeadRel] = res.stdout
-    .split(/\r?\n/)
-    .map((s) => s.trim());
-  if ((rebaseMergeRel && existsSync(resolve(workDir, rebaseMergeRel))) || (rebaseApplyRel && existsSync(resolve(workDir, rebaseApplyRel)))) {
-    return 'rebase';
-  }
-  if (mergeHeadRel && existsSync(resolve(workDir, mergeHeadRel))) {
-    return 'merge';
+  const relPaths = res.stdout.split(/\r?\n/).map((s) => s.trim());
+  for (let i = 0; i < GIT_OP_PATHS.length; i += 1) {
+    const rel = relPaths[i];
+    if (rel && existsSync(resolve(workDir, rel))) {
+      return GIT_OP_PATHS[i][1];
+    }
   }
   return null;
 }
@@ -132,7 +148,16 @@ export async function getWorktreeInProgressOp(workDir) {
  * When a local `wt merge` fails, inspect worktrees for active conflicts or materialize the merge
  * in the target worktree if `wt merge` refused/aborted due to merge conflicts.
  * @param {string} repoPath
- * @param {{ sourceBranch: string, targetBranch?: string, noFf?: boolean, noSquash?: boolean, wtOutput?: string }} options
+ * @param {{
+ *   sourceBranch: string,
+ *   targetBranch?: string,
+ *   noFf?: boolean,
+ *   noSquash?: boolean,
+ *   noRebase?: boolean,
+ *   wtOutput?: string,
+ *   wtBin?: string,
+ *   wtMergeOptions?: Record<string, any> | null,
+ * }} options
  */
 export async function detectOrStartLocalConflictSession(repoPath, options) {
   const worktrees = await listGitWorktrees(repoPath);
@@ -141,13 +166,24 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
     .split(/\r?\n/)
     .map((s) => s.trim())
     .filter(Boolean);
-  const defaultBranch = await detectDefaultBranch(repoPath, localBranches);
-  const mainWt = worktrees.find((w) => w.isMain) || worktrees[0] || { path: repoPath, branch: defaultBranch };
-  const targetBranch = String(options.targetBranch || mainWt.branch || defaultBranch).trim();
+  const defaultBranch = await detectDefaultBranch(repoPath, localBranches, options.wtBin);
+  const mainWt =
+    worktrees.find((w) => w.branch === defaultBranch) ||
+    worktrees.find((w) => w.isMain) ||
+    worktrees[0] ||
+    { path: repoPath, branch: defaultBranch };
+  const targetBranch = String(options.targetBranch || defaultBranch || mainWt.branch).trim();
   const sourceBranch = String(options.sourceBranch || '').trim();
 
+  // Prefer checking the source worktree first (where `wt merge` leaves rebase conflicts), then target.
+  const sortedWts = [...worktrees].sort((a, b) => {
+    const aScore = a.branch === sourceBranch ? 2 : a.branch === targetBranch ? 1 : 0;
+    const bScore = b.branch === sourceBranch ? 2 : b.branch === targetBranch ? 1 : 0;
+    return bScore - aScore;
+  });
+
   // 1. Check if any worktree already has unresolved files left by wt merge
-  for (const wt of worktrees) {
+  for (const wt of sortedWts) {
     const status = await getConflictStatus(wt.path);
     if (status.unresolvedCount > 0) {
       return {
@@ -155,7 +191,9 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
         conflictSession: {
           workDir: wt.path,
           sourceBranch,
-          targetBranch: wt.branch || targetBranch,
+          targetBranch,
+          operation: status.operation,
+          wtMergeOptions: options.wtMergeOptions || null,
           autoPush: false,
           files: status.files,
           unmergedFiles: status.unmergedFiles,
@@ -164,13 +202,8 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
     }
   }
 
-  // 1b. If a git rebase/merge is already in progress (e.g. staged conflicts awaiting --continue / --abort),
+  // 1b. If a git operation is already in progress (e.g. staged conflicts awaiting --continue / --abort),
   // open the conflict modal for that worktree so the user can finish or abort it directly in the UI.
-  const sortedWts = [...worktrees].sort((a, b) => {
-    const aScore = a.branch === sourceBranch ? 2 : a.branch === targetBranch ? 1 : 0;
-    const bScore = b.branch === sourceBranch ? 2 : b.branch === targetBranch ? 1 : 0;
-    return bScore - aScore;
-  });
   for (const wt of sortedWts) {
     const inProgressOp = await getWorktreeInProgressOp(wt.path);
     if (inProgressOp) {
@@ -180,7 +213,9 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
         conflictSession: {
           workDir: wt.path,
           sourceBranch,
-          targetBranch: wt.branch || targetBranch,
+          targetBranch,
+          operation: status.operation || inProgressOp,
+          wtMergeOptions: options.wtMergeOptions || null,
           autoPush: false,
           files: status.files,
           unmergedFiles: status.unmergedFiles,
@@ -189,9 +224,10 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
     }
   }
 
-  // 2. If wt merge aborted/refused because of conflicts, start `git merge` in target worktree so user can resolve visually
+  // 2. If `wt merge` aborted/refused because of merge conflicts without leaving an open state,
+  // start `git merge` in target worktree only when a merge commit is allowed (--no-ff or squash allowed).
   const looksLikeConflict = /conflict|冲突|unmerged|automatic merge failed/i.test(options.wtOutput || '');
-  if (!looksLikeConflict || !sourceBranch) {
+  if (!looksLikeConflict || !sourceBranch || (options.noRebase && !options.noFf)) {
     return { hasConflicts: false, conflictSession: null };
   }
 
@@ -210,6 +246,8 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
         workDir: targetWt.path,
         sourceBranch,
         targetBranch,
+        operation: afterStatus.operation || 'merge',
+        wtMergeOptions: options.wtMergeOptions || null,
         autoPush: false,
         files: afterStatus.files,
         unmergedFiles: afterStatus.unmergedFiles,
@@ -263,17 +301,23 @@ export async function pullWorktreeBranch(repoPath, options = {}) {
     currentBranch = revRes.stdout.trim();
   }
 
-  // Guard against pulling while a rebase or merge is already in progress (which detaches HEAD).
+  // Guard against pulling while a Git operation is already in progress.
   const inProgressOp = await getWorktreeInProgressOp(workDir);
   if (inProgressOp) {
-    const opName = inProgressOp === 'rebase' ? '变基 (rebase)' : '合并 (merge)';
-    const hintCmd = inProgressOp === 'rebase' ? 'git rebase --continue / --abort' : 'git commit / git merge --abort';
+    const opLabels = {
+      rebase: ['变基 (rebase)', 'git rebase --continue / --abort'],
+      merge: ['合并 (merge)', 'git commit / git merge --abort'],
+      cherry_pick: ['拣选 (cherry-pick)', 'git cherry-pick --continue / --abort'],
+      revert: ['还原 (revert)', 'git revert --continue / --abort'],
+      bisect: ['二分查找 (bisect)', 'git bisect reset'],
+    };
+    const [opName, hintCmd] = opLabels[inProgressOp] || ['Git 操作', 'git status'];
     return {
       ok: false,
       hasConflicts: false,
       command: formatCommand('git', ['-C', workDir, 'status']),
       stdout: '',
-      stderr: `当前工作树存在未完成的${opName}，无法直接拉取。请点击「解决冲突」中的「完成合并并提交」或「放弃合并」完成收尾（或终端执行 ${hintCmd}），切勿点击「移除」。`,
+      stderr: `当前工作树存在未完成的${opName}，无法直接拉取。请点击「解决冲突」中的完成或放弃操作收尾（或终端执行 ${hintCmd}），切勿点击「移除」。`,
       conflictSession: null,
     };
   }
@@ -342,6 +386,7 @@ export async function pullWorktreeBranch(repoPath, options = {}) {
         workDir,
         sourceBranch: sourceBranchLabel,
         targetBranch: currentBranch || 'HEAD',
+        operation: conflictStatus.operation || 'merge',
         autoPush: false,
         files: conflictStatus.files,
         unmergedFiles: conflictStatus.unmergedFiles,
