@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { formatCommand, parseWtJson, runWt } from './wt-resolver.js';
@@ -222,7 +222,8 @@ export function quoteCmdArg(arg) {
   s = s.replace(/%/g, '%%');
   if (!s) return '""';
   if (/[\s"&|<>^(),;=!%]/.test(s)) {
-    return `"${s.replace(/"/g, '""')}"`;
+    // Close quote, emit cmd-escaped caret-quote `^"`, and reopen quote so & | < > never execute unquoted
+    return `"${s.replace(/"/g, '"^""')}"`;
   }
   return s;
 }
@@ -260,13 +261,29 @@ export function spawnDetached(command, args, options = {}) {
   });
 }
 
-function isOnPath(bin, platform = process.platform) {
-  const pathDirs = (process.env.PATH || '').split(delimiter).filter(Boolean);
+function isExecutableFile(candidate, platform = process.platform) {
+  try {
+    if (!statSync(candidate).isFile()) return false;
+    if (platform !== 'win32') {
+      accessSync(candidate, fsConstants.X_OK);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isOnPath(bin, platform = process.platform) {
+  if (!bin) return false;
   const exts =
     platform === 'win32' && !/\.[a-z0-9]+$/i.test(bin)
-      ? ['', '.exe', '.cmd', '.bat']
+      ? ['', ...(process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)]
       : [''];
-  return pathDirs.some((dir) => exts.some((ext) => existsSync(join(dir, `${bin}${ext}`))));
+  if (bin.includes('/') || bin.includes('\\')) {
+    return exts.some((ext) => isExecutableFile(`${bin}${ext}`, platform));
+  }
+  const pathDirs = (process.env.PATH || '').split(delimiter).filter(Boolean);
+  return pathDirs.some((dir) => exts.some((ext) => isExecutableFile(join(dir, `${bin}${ext}`), platform)));
 }
 
 const MACOS_GUI_APP_BUNDLES = {
@@ -426,14 +443,58 @@ export function findLinuxTerminal(preferredTerminal = '') {
  * `wt switch` has already created/switched the worktree and executed hooks beforehand,
  * so the terminal only launches the tool in `worktreePath` without invoking `wt switch` a second time.
  */
-function buildLaunchArgv({ tool, extraArgs }) {
-  return [tool.command, ...extraArgs];
-}
-
 function launchScriptDir() {
   const dir = join(tmpdir(), 'wt-ui-launch');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+const WINDOWS_RUNNER_BODY = String.raw`
+if (cfg.cwd) { try { process.chdir(cfg.cwd); } catch (e) { console.error(e.message); } }
+function resolveWinBin(cmd) {
+  if (!cmd || cmd.includes('\\') || cmd.includes('/')) return cmd;
+  const pathext = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
+  const hasExt = /\.[a-z0-9]+$/i.test(cmd);
+  for (const dir of (process.env.PATH || '').split(delimiter).filter(Boolean)) {
+    for (const ext of hasExt ? [''] : pathext) {
+      const p = join(dir, cmd + ext);
+      try { if (statSync(p).isFile()) return p; } catch {}
+    }
+  }
+  return cmd;
+}
+const bin = resolveWinBin(cfg.command);
+const isBatch = /\.(?:cmd|bat)$/i.test(bin);
+try {
+  const res = isBatch
+    ? spawnSync('cmd.exe', ['/d', '/c', bin, ...cfg.args], { stdio: 'inherit', cwd: cfg.cwd || undefined })
+    : spawnSync(bin, cfg.args, { stdio: 'inherit', cwd: cfg.cwd || undefined });
+  if (res.error) { console.error(res.error.message); process.exitCode = 1; }
+  else if (typeof res.status === 'number' && res.status !== 0) { process.exitCode = res.status; }
+} finally {
+  try { rmSync(selfPath, { force: true }); } catch {}
+}
+`;
+
+export function buildWindowsRunnerScriptSource({ cwd, command, args }) {
+  const payloadJson = JSON.stringify({ cwd: cwd || '', command, args });
+  return [
+    "import { spawnSync } from 'node:child_process';",
+    "import { rmSync, statSync } from 'node:fs';",
+    "import { delimiter, join } from 'node:path';",
+    "import { fileURLToPath } from 'node:url';",
+    'const selfPath = fileURLToPath(import.meta.url);',
+    'try { rmSync(selfPath, { force: true }); } catch {}',
+    `const cfg = ${payloadJson};`,
+    WINDOWS_RUNNER_BODY.trim(),
+    '',
+  ].join('\n');
+}
+
+function writeWindowsRunnerScript(spec) {
+  const runnerPath = join(launchScriptDir(), `launch-${randomUUID().slice(0, 8)}.mjs`);
+  writeFileSync(runnerPath, buildWindowsRunnerScriptSource(spec), 'utf8');
+  return runnerPath;
 }
 
 /**
@@ -453,41 +514,41 @@ export async function spawnInNewTerminal({
     extraArgs.push(prompt);
   }
   const cwd = worktreePath && existsSync(worktreePath) ? worktreePath : repoPath;
-  const argv = tool.id === 'terminal' ? null : buildLaunchArgv({ tool, extraArgs });
+  const argv = tool.command ? [tool.command, ...extraArgs] : null;
   const pref = String(preferredTerminal || '').trim().toLowerCase();
 
   if (process.platform === 'win32') {
-    // Write a temporary .cmd script instead of nesting quotes through two cmd.exe
-    // parsers; this stays correct for paths with spaces, CJK characters and
-    // prompts containing & | % ^ " etc.
-    const lines = ['@echo off', 'chcp 65001 >nul'];
-    if (cwd) lines.push(`cd /d ${quoteCmdArg(cwd)}`);
-    if (argv) lines.push(argv.map(quoteCmdArg).join(' '));
-    lines.push('(goto) 2>nul & del "%~f0"');
-    const scriptPath = join(launchScriptDir(), `launch-${randomUUID().slice(0, 8)}.cmd`);
-    writeFileSync(scriptPath, `${lines.join('\r\n')}\r\n`, 'utf8');
-
     const title = `wt-ui ${branch || tool.name}`.replace(/["%^&|<>]/g, '');
+    const runnerPath = argv
+      ? writeWindowsRunnerScript({ cwd, command: argv[0], args: argv.slice(1) })
+      : null;
+
+    const cleanupRunner = () => {
+      if (runnerPath) {
+        try {
+          rmSync(runnerPath, { force: true });
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+    };
+
     if (pref === 'wt') {
-      const wtRes = await spawnDetached(
-        'wt.exe',
-        [...(cwd ? ['-d', cwd] : []), 'cmd.exe', '/k', scriptPath],
-        { cwd: cwd || undefined, windowsHide: false }
-      );
+      const wtArgs = [...(cwd ? ['-d', cwd] : []), 'cmd.exe', ...(runnerPath ? ['/k', process.execPath, runnerPath] : ['/k'])];
+      const wtRes = await spawnDetached('wt.exe', wtArgs, { cwd: cwd || undefined, windowsHide: false });
       if (wtRes.ok) return wtRes;
     } else if (pref === 'powershell' || pref === 'pwsh') {
       const psBin = pref === 'pwsh' && isOnPath('pwsh.exe', 'win32') ? 'pwsh.exe' : 'powershell.exe';
       const psQuote = (s) => `'${String(s ?? '').replace(/'/g, "''")}'`;
-      const psLines = [
+      const psCmd = [
         '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
         cwd ? `Set-Location -LiteralPath ${psQuote(cwd)}` : '',
-        argv ? `& ${argv.map(psQuote).join(' ')}` : '',
-        'Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue',
-      ].filter(Boolean);
-      const ps1Path = join(launchScriptDir(), `launch-${randomUUID().slice(0, 8)}.ps1`);
-      // UTF-8 with BOM ensures Windows PowerShell 5.1 reads CJK paths accurately
-      writeFileSync(ps1Path, `\uFEFF${psLines.join('\r\n')}\r\n`, 'utf8');
-      const cmdLine = `/d /s /c "start "${title}" ${psBin} -NoExit -ExecutionPolicy Bypass -File "${ps1Path}""`;
+        runnerPath ? `& ${psQuote(process.execPath)} ${psQuote(runnerPath)}` : '',
+      ]
+        .filter(Boolean)
+        .join('; ');
+      const encoded = Buffer.from(psCmd, 'utf16le').toString('base64');
+      const cmdLine = `/d /s /c "start "${title}" ${psBin} -NoExit -EncodedCommand ${encoded}"`;
       const psRes = await spawnDetached('cmd.exe', [cmdLine], {
         cwd: cwd || undefined,
         windowsVerbatimArguments: true,
@@ -497,18 +558,13 @@ export async function spawnInNewTerminal({
     } else if (pref === 'git-bash') {
       const gitBashBin = findWindowsGitBash();
       if (gitBashBin) {
-        const shPath = join(launchScriptDir(), `launch-${randomUUID().slice(0, 8)}.sh`);
-        const shLines = [
-          '#!/usr/bin/env bash',
-          'rm -f "$0"',
-          cwd ? `cd ${quotePosixArg(cwd)}` : '',
-          argv ? argv.map(quotePosixArg).join(' ') : '',
-          'exec "${SHELL:-/bin/bash}" -l',
-        ].filter(Boolean);
-        writeFileSync(shPath, `${shLines.join('\n')}\n`, 'utf8');
+        const nodePosix = process.execPath.replace(/\\/g, '/');
+        const bashCmd = runnerPath
+          ? `${quotePosixArg(nodePosix)} ${quotePosixArg(runnerPath.replace(/\\/g, '/'))}; exec "\${SHELL:-/bin/bash}" -l`
+          : 'exec "${SHELL:-/bin/bash}" -l';
         const gbRes = await spawnDetached(
           gitBashBin,
-          [...(cwd ? [`--cd=${cwd}`] : []), '-c', `bash ${quotePosixArg(shPath.replace(/\\/g, '/'))}`],
+          [...(cwd ? [`--cd=${cwd}`] : []), '-c', bashCmd],
           { cwd: cwd || undefined, windowsHide: false }
         );
         if (gbRes.ok) return gbRes;
@@ -516,12 +572,18 @@ export async function spawnInNewTerminal({
     }
 
     // Default / fallback on Windows: cmd.exe
-    const cmdLine = `/d /s /c "start "${title}" cmd.exe /k "${scriptPath}""`;
-    return spawnDetached('cmd.exe', [cmdLine], {
+    const cmdLine = runnerPath
+      ? `/d /s /c "start "${title}" cmd.exe /k ""${process.execPath}" "${runnerPath}"""`
+      : `/d /s /c "start "${title}" cmd.exe /k"`;
+    const fallbackRes = await spawnDetached('cmd.exe', [cmdLine], {
       cwd: cwd || undefined,
       windowsVerbatimArguments: true,
       windowsHide: false,
     });
+    if (!fallbackRes.ok) {
+      cleanupRunner();
+    }
+    return fallbackRes;
   }
 
   const shellLine = [
@@ -633,25 +695,34 @@ export async function spawnInNewTerminal({
   // Linux (including WSL support)
   const userShell = process.env.SHELL || '/bin/sh';
   const hasLinuxGui = Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+  const linuxWrappedCmd = `${shellLine || 'true'}; exec ${quotePosixArg(userShell)} -l`;
   if (hasLinuxGui) {
     const term = findLinuxTerminal(pref);
     if (term) {
-      // Keep the window open with an interactive shell after the tool exits.
-      const wrapped = ['sh', '-c', `${shellLine || ':'}; exec ${quotePosixArg(userShell)}`];
+      // Launch via login/interactive userShell so nvm, cargo and local bin paths load cleanly
+      const wrapped = [userShell, '-lic', linuxWrappedCmd];
       return spawnDetached(term.bin, term.build(wrapped), { cwd: cwd || undefined });
     }
   }
 
   // WSL fallback: if running inside Windows Subsystem for Linux and wt.exe or cmd.exe is reachable
   if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
-    const wrappedCmd = `${shellLine || ':'}; exec ${quotePosixArg(userShell)}`;
+    const wslArgs = [
+      ...(process.env.WSL_DISTRO_NAME ? ['-d', process.env.WSL_DISTRO_NAME] : []),
+      '--cd',
+      cwd || '~',
+      '--',
+      userShell,
+      '-lic',
+      linuxWrappedCmd,
+    ];
     if (isOnPath('wt.exe', 'linux')) {
-      return spawnDetached('wt.exe', ['wsl.exe', '--cd', cwd || '~', '--', 'sh', '-lic', wrappedCmd], {
+      return spawnDetached('wt.exe', ['wsl.exe', ...wslArgs], {
         cwd: cwd || undefined,
       });
     }
     if (isOnPath('cmd.exe', 'linux')) {
-      return spawnDetached('cmd.exe', ['/c', 'start', 'wsl.exe', '--cd', cwd || '~', '--', 'sh', '-lic', wrappedCmd], {
+      return spawnDetached('cmd.exe', ['/c', 'start', 'wsl.exe', ...wslArgs], {
         cwd: cwd || undefined,
       });
     }

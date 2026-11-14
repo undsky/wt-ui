@@ -36,17 +36,42 @@ export function getManagedWtBinPath(platform = process.platform) {
 export function getReleaseAssetName(platform = process.platform, arch = process.arch) {
   if (platform === 'win32') {
     // Upstream only ships x64 for Windows; Windows 11 on ARM runs it via emulation.
+    if (arch !== 'x64' && arch !== 'arm64') {
+      throw new Error(`Unsupported Windows architecture for Worktrunk prebuilt binary: ${arch}`);
+    }
     return 'worktrunk-x86_64-pc-windows-msvc.zip';
   }
   if (platform === 'darwin') {
-    return arch === 'arm64'
-      ? 'worktrunk-aarch64-apple-darwin.tar.xz'
-      : 'worktrunk-x86_64-apple-darwin.tar.xz';
+    if (arch === 'arm64') return 'worktrunk-aarch64-apple-darwin.tar.xz';
+    if (arch === 'x64') return 'worktrunk-x86_64-apple-darwin.tar.xz';
+    throw new Error(`Unsupported macOS architecture for Worktrunk prebuilt binary: ${arch}`);
   }
-  // Linux builds are statically linked against musl (works on glibc distros and Alpine).
-  return arch === 'arm64'
-    ? 'worktrunk-aarch64-unknown-linux-musl.tar.xz'
-    : 'worktrunk-x86_64-unknown-linux-musl.tar.xz';
+  if (platform === 'linux') {
+    // Linux builds are statically linked against musl (works on glibc distros and Alpine).
+    if (arch === 'arm64') return 'worktrunk-aarch64-unknown-linux-musl.tar.xz';
+    if (arch === 'x64') return 'worktrunk-x86_64-unknown-linux-musl.tar.xz';
+    throw new Error(`Unsupported Linux architecture for Worktrunk prebuilt binary: ${arch}`);
+  }
+  throw new Error(`Unsupported platform/architecture for Worktrunk prebuilt binary: ${platform}/${arch}`);
+}
+
+export function hasValidArchiveMagic(assetName, buf) {
+  if (!Buffer.isBuffer(buf) && !(buf instanceof Uint8Array)) return false;
+  if (assetName.endsWith('.zip')) {
+    return buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && (buf[2] === 0x03 || buf[2] === 0x05);
+  }
+  if (assetName.endsWith('.tar.xz')) {
+    return (
+      buf.length >= 6 &&
+      buf[0] === 0xfd &&
+      buf[1] === 0x37 &&
+      buf[2] === 0x7a &&
+      buf[3] === 0x58 &&
+      buf[4] === 0x5a &&
+      buf[5] === 0x00
+    );
+  }
+  return true;
 }
 
 /**
@@ -93,6 +118,9 @@ async function downloadWithTimeout(url, { minBytes = 1024, idleTimeoutMs = 30_00
     });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
+    }
+    if (!res.body) {
+      throw new Error('Empty response body');
     }
     const chunks = [];
     let total = 0;
@@ -169,7 +197,13 @@ async function extractArchive(archivePath, extractDir) {
 }
 
 async function installViaMirrorBinary(onLog) {
-  const asset = getReleaseAssetName();
+  let asset;
+  try {
+    asset = getReleaseAssetName();
+  } catch (err) {
+    onLog?.(`跳过预编译二进制下载: ${err.message}`);
+    return { ok: false, method: 'mirror-binary', error: err.message };
+  }
   const githubUrl = `https://github.com/max-sixty/worktrunk/releases/latest/download/${asset}`;
   const tempRoot = mkdtempSync(join(tmpdir(), 'wt-install-'));
   const archivePath = join(tempRoot, asset);
@@ -186,6 +220,10 @@ async function installViaMirrorBinary(onLog) {
       onLog?.(`尝试从镜像下载 Worktrunk: ${mirror || 'github.com (直连)'}`);
       try {
         const buf = await downloadWithTimeout(url);
+        if (!hasValidArchiveMagic(asset, buf)) {
+          onLog?.(`✗ 下载内容不是有效的压缩包 (${label})，可能返回了错误页面，已丢弃`);
+          continue;
+        }
         const expected = await fetchExpectedSha256(githubUrl, mirror);
         const actual = createHash('sha256').update(buf).digest('hex');
         if (expected && expected !== actual) {

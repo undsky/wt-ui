@@ -21,7 +21,7 @@ export async function runGit(cwd, args, options = {}) {
       timeout: options.timeout ?? 60_000,
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true,
-      ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
+      env: { ...process.env, LC_ALL: 'C', LANG: 'C', ...(options.env || {}) },
     });
     return {
       ok: true,
@@ -117,6 +117,7 @@ const GIT_OP_PATHS = [
   ['rebase-merge', 'rebase'],
   ['rebase-apply', 'rebase'],
   ['MERGE_HEAD', 'merge'],
+  ['SQUASH_MSG', 'merge'],
   ['CHERRY_PICK_HEAD', 'cherry_pick'],
   ['REVERT_HEAD', 'revert'],
   ['BISECT_LOG', 'bisect'],
@@ -225,13 +226,18 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
   }
 
   // 2. If `wt merge` aborted/refused because of merge conflicts without leaving an open state,
-  // start `git merge` in target worktree only when a merge commit is allowed (--no-ff or squash allowed).
+  // start `git merge` in target worktree when merge commit or squash merge is allowed.
   const looksLikeConflict = /conflict|冲突|unmerged|automatic merge failed/i.test(options.wtOutput || '');
-  if (!looksLikeConflict || !sourceBranch || (options.noRebase && !options.noFf)) {
+  const onlyFastForwardAllowed = Boolean(options.noRebase && options.noSquash && !options.noFf);
+  if (!looksLikeConflict || !sourceBranch || onlyFastForwardAllowed) {
     return { hasConflicts: false, conflictSession: null };
   }
 
-  const targetWt = worktrees.find((w) => w.branch === targetBranch) || mainWt;
+  const targetWt = worktrees.find((w) => w.branch === targetBranch);
+  if (!targetWt || targetWt.branch !== targetBranch) {
+    return { hasConflicts: false, conflictSession: null };
+  }
+
   const mergeArgs = ['merge'];
   if (options.noFf) mergeArgs.push('--no-ff');
   else if (!options.noSquash) mergeArgs.push('--squash');
@@ -240,6 +246,9 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
   await runGit(targetWt.path, mergeArgs, { timeout: 30_000 });
   const afterStatus = await getConflictStatus(targetWt.path);
   if (afterStatus.unresolvedCount > 0) {
+    const wtMergeOptions = options.wtMergeOptions
+      ? { ...options.wtMergeOptions, alreadyMergedToTarget: true }
+      : null;
     return {
       hasConflicts: true,
       conflictSession: {
@@ -247,7 +256,7 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
         sourceBranch,
         targetBranch,
         operation: afterStatus.operation || 'merge',
-        wtMergeOptions: options.wtMergeOptions || null,
+        wtMergeOptions,
         autoPush: false,
         files: afterStatus.files,
         unmergedFiles: afterStatus.unmergedFiles,
@@ -280,6 +289,19 @@ async function getPullReconcileFlag(workDir, currentBranch) {
   return ['--no-rebase'];
 }
 
+async function resolveTargetWorktree(repoPath, options = {}) {
+  const worktrees = await listGitWorktrees(repoPath);
+  if (options.workDir) {
+    const absWorkDir = resolve(options.workDir);
+    const matched = worktrees.find((w) => samePath(w.path, absWorkDir));
+    return matched || { path: absWorkDir, branch: options.branch || '' };
+  }
+  if (options.branch) {
+    return worktrees.find((w) => w.branch === options.branch) || null;
+  }
+  return worktrees.find((w) => w.isMain) || worktrees[0] || { path: repoPath, branch: '' };
+}
+
 /**
  * Pull remote updates into a local worktree using `git pull --autostash`,
  * and detect any resulting merge or autostash conflicts.
@@ -287,12 +309,17 @@ async function getPullReconcileFlag(workDir, currentBranch) {
  * @param {{ workDir?: string, branch?: string }} [options]
  */
 export async function pullWorktreeBranch(repoPath, options = {}) {
-  const worktrees = await listGitWorktrees(repoPath);
-  const targetWt =
-    (options.workDir && worktrees.find((w) => samePath(w.path, resolve(options.workDir)))) ||
-    (options.branch && worktrees.find((w) => w.branch === options.branch)) ||
-    worktrees.find((w) => w.isMain) ||
-    { path: repoPath, branch: options.branch || '' };
+  const targetWt = await resolveTargetWorktree(repoPath, options);
+  if (!targetWt) {
+    return {
+      ok: false,
+      hasConflicts: false,
+      command: '',
+      stdout: '',
+      stderr: `分支 ${options.branch || ''} 当前没有检出到工作树，无法执行拉取`,
+      conflictSession: null,
+    };
+  }
 
   const workDir = targetWt.path;
   let currentBranch = String(options.branch || targetWt.branch || '').trim();
@@ -426,19 +453,42 @@ export function isNonFastForwardPushError(stderr = '', stdout = '') {
  * @param {{ workDir?: string, branch?: string, forceWithLease?: boolean }} [options]
  */
 export async function pushWorktreeBranch(repoPath, options = {}) {
-  const worktrees = await listGitWorktrees(repoPath);
-  const targetWt =
-    (options.workDir && worktrees.find((w) => samePath(w.path, resolve(options.workDir)))) ||
-    (options.branch && worktrees.find((w) => w.branch === options.branch)) ||
-    worktrees.find((w) => w.isMain) ||
-    { path: repoPath, branch: options.branch || '' };
+  const targetWt = await resolveTargetWorktree(repoPath, options);
+  const forceWithLease = Boolean(options.forceWithLease);
+  const forceArgs = forceWithLease ? ['--force-with-lease'] : [];
+
+  if (!targetWt && options.branch) {
+    const branch = String(options.branch).trim();
+    const configuredRemoteRes = await runGit(repoPath, ['config', '--get', `branch.${branch}.remote`], {
+      timeout: 5_000,
+    });
+    let remoteName = configuredRemoteRes.ok ? configuredRemoteRes.stdout.trim() : '';
+    if (!remoteName) {
+      const remoteRes = await runGit(repoPath, ['remote'], { timeout: 5_000 });
+      remoteName =
+        remoteRes.stdout
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .find(Boolean) || 'origin';
+    }
+    const trackingArgs = configuredRemoteRes.ok ? [] : ['-u'];
+    const refspec = `refs/heads/${branch}:refs/heads/${branch}`;
+    const pushRes = await runGit(repoPath, ['push', ...forceArgs, ...trackingArgs, remoteName, refspec], {
+      timeout: 60_000,
+    });
+    return {
+      ...pushRes,
+      workDir: repoPath,
+      branch,
+      forceWithLease,
+      nonFastForward: !pushRes.ok && isNonFastForwardPushError(pushRes.stderr, pushRes.stdout),
+    };
+  }
 
   const workDir = targetWt.path;
-  let currentBranch = String(options.branch || targetWt.branch || '').trim();
-  if (!currentBranch) {
-    const revRes = await runGit(workDir, ['rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 5_000 });
-    currentBranch = revRes.stdout.trim();
-  }
+  const headRes = await runGit(workDir, ['rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 5_000 });
+  const headBranch = headRes.ok ? headRes.stdout.trim() : '';
+  const currentBranch = String(options.branch || targetWt.branch || headBranch || '').trim();
 
   const upstreamRes = await runGit(
     workDir,
@@ -446,12 +496,23 @@ export async function pushWorktreeBranch(repoPath, options = {}) {
     { timeout: 5_000 }
   );
 
-  const forceWithLease = Boolean(options.forceWithLease);
-  const forceArgs = forceWithLease ? ['--force-with-lease'] : [];
-
   let pushArgs;
   if (upstreamRes.ok && upstreamRes.stdout.trim()) {
-    pushArgs = ['push', ...forceArgs];
+    const [remoteCfg, mergeCfg] =
+      headBranch && headBranch !== 'HEAD'
+        ? await Promise.all([
+            runGit(workDir, ['config', '--get', `branch.${headBranch}.remote`], { timeout: 5_000 }),
+            runGit(workDir, ['config', '--get', `branch.${headBranch}.merge`], { timeout: 5_000 }),
+          ])
+        : [{ ok: false, stdout: '' }, { ok: false, stdout: '' }];
+    const upstreamRemote = remoteCfg.ok ? remoteCfg.stdout.trim() : '';
+    const upstreamMerge = mergeCfg.ok ? mergeCfg.stdout.trim() : '';
+    const upstreamShort = upstreamMerge.replace(/^refs\/heads\//, '');
+    if (upstreamRemote && upstreamMerge && upstreamShort && upstreamShort !== headBranch) {
+      pushArgs = ['push', ...forceArgs, upstreamRemote, `HEAD:${upstreamMerge}`];
+    } else {
+      pushArgs = ['push', ...forceArgs];
+    }
   } else {
     const remoteRes = await runGit(workDir, ['remote'], { timeout: 5_000 });
     const firstRemote =
@@ -459,8 +520,9 @@ export async function pushWorktreeBranch(repoPath, options = {}) {
         .split(/\r?\n/)
         .map((s) => s.trim())
         .find(Boolean) || 'origin';
-    pushArgs = currentBranch
-      ? ['push', ...forceArgs, '-u', firstRemote, currentBranch]
+    const pushBranch = headBranch && headBranch !== 'HEAD' ? headBranch : currentBranch;
+    pushArgs = pushBranch
+      ? ['push', ...forceArgs, '-u', firstRemote, pushBranch]
       : ['push', ...forceArgs];
   }
 

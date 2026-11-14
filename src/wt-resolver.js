@@ -7,8 +7,15 @@ import { getManagedWtBinPath } from './wt-installer.js';
 
 const execFileAsync = promisify(execFile);
 
-const WINDOWS_TERMINAL_PATTERN = /\\WindowsApps\\wt\.exe$/i;
+const WINDOWS_TERMINAL_PATTERN = /[/\\]WindowsApps[/\\]wt\.exe$/i;
 const MIN_GIT_VERSION = [2, 43, 0];
+
+function execWtRaw(binPath, args, execOptions) {
+  if (process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(binPath)) {
+    return execFileAsync('cmd.exe', ['/d', '/c', binPath, ...args], execOptions);
+  }
+  return execFileAsync(binPath, args, execOptions);
+}
 
 /**
  * Parse a semantic-ish version tuple like "2.37.0" from a string.
@@ -41,11 +48,14 @@ export function compareVersions(a, b) {
  */
 async function probeWtBinary(binPath) {
   if (!binPath) return { ok: false, version: null };
-  if (process.platform === 'win32' && WINDOWS_TERMINAL_PATTERN.test(binPath)) {
+  if (
+    process.platform === 'win32' &&
+    (WINDOWS_TERMINAL_PATTERN.test(binPath) || /^wt(?:\.exe)?$/i.test(binPath))
+  ) {
     return { ok: false, version: null };
   }
   try {
-    const { stdout, stderr } = await execFileAsync(binPath, ['--version'], {
+    const { stdout, stderr } = await execWtRaw(binPath, ['--version'], {
       timeout: 4000,
       windowsHide: true,
     });
@@ -105,15 +115,27 @@ async function collectWtCandidates(explicitBin) {
     if (existsSync(wingetRoot)) {
       try {
         for (const entry of readdirSync(wingetRoot)) {
-          if (entry.toLowerCase().startsWith('max-sixty.worktrunk')) {
-            const exePath = join(wingetRoot, entry, 'wt.exe');
-            if (existsSync(exePath)) add(exePath);
+          if (!entry.toLowerCase().startsWith('max-sixty.worktrunk')) continue;
+          const pkgDir = join(wingetRoot, entry);
+          const directExe = join(pkgDir, 'wt.exe');
+          if (existsSync(directExe)) add(directExe);
+          // WinGet archives sometimes nest wt.exe one subdirectory deeper
+          try {
+            for (const sub of readdirSync(pkgDir, { withFileTypes: true })) {
+              if (!sub.isDirectory()) continue;
+              const nestedExe = join(pkgDir, sub.name, 'wt.exe');
+              if (existsSync(nestedExe)) add(nestedExe);
+            }
+          } catch {
+            // Ignore unreadable subdirectory
           }
         }
       } catch {
         // Ignore permission errors
       }
     }
+    const scoopExe = join(process.env.SCOOP || join(homedir(), 'scoop'), 'shims', 'wt.exe');
+    if (existsSync(scoopExe)) add(scoopExe);
     const cargoExe = join(homedir(), '.cargo', 'bin', 'wt.exe');
     if (existsSync(cargoExe)) add(cargoExe);
   } else {
@@ -274,7 +296,7 @@ async function checkEnvironmentUncached(options = {}) {
 export async function runWt(wtBin, repoPath, args, options = {}) {
   const fullArgs = repoPath ? ['-C', repoPath, ...args] : [...args];
   try {
-    const { stdout, stderr } = await execFileAsync(wtBin, fullArgs, {
+    const { stdout, stderr } = await execWtRaw(wtBin, fullArgs, {
       timeout: options.timeout ?? 60_000,
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true,
@@ -409,7 +431,7 @@ export function buildWtMergeArgs(opts = {}, { includeYes = true } = {}) {
  */
 export function formatCommand(bin, args) {
   const quote = (v) => (/[\s"'`]/.test(v) ? `"${v.replace(/"/g, '\\"')}"` : v);
-  const shortBin = bin.toLowerCase().endsWith('wt.exe') || bin.endsWith('/wt') || bin === 'wt' ? 'wt' : quote(bin);
+  const shortBin = /(?:^|[/\\])wt(?:\.exe)?$/i.test(bin) ? 'wt' : quote(bin);
   return [shortBin, ...args.map(quote)].join(' ');
 }
 

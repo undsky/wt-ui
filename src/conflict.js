@@ -191,7 +191,9 @@ export function applyHunkResolution(content, hunkIndex, choice) {
  */
 export async function getConflictStatus(workDir, trackedFiles = []) {
   const [unmergedRes, operation] = await Promise.all([
-    runGit(workDir, ['diff', '--name-only', '--diff-filter=U'], { timeout: 10_000 }),
+    runGit(workDir, ['-c', 'core.quotepath=false', 'diff', '--name-only', '--diff-filter=U'], {
+      timeout: 10_000,
+    }),
     getWorktreeInProgressOp(workDir),
   ]);
   const unmergedFiles = unmergedRes.stdout
@@ -238,9 +240,13 @@ export async function readConflictFileDetails(workDir, filePath) {
   const { full, rel } = resolveSafeRepoFile(workDir, filePath);
   const content = existsSync(full) ? readFileSync(full, 'utf8') : '';
   const parsed = parseConflictHunks(content);
-  const unmergedRes = await runGit(workDir, ['diff', '--name-only', '--diff-filter=U', '--', rel], {
-    timeout: 5_000,
-  });
+  const unmergedRes = await runGit(
+    workDir,
+    ['-c', 'core.quotepath=false', 'diff', '--name-only', '--diff-filter=U', '--', rel],
+    {
+      timeout: 5_000,
+    }
+  );
   const isUnmerged = Boolean(unmergedRes.stdout.trim());
 
   return {
@@ -273,9 +279,17 @@ export async function resolveConflictFile(workDir, options) {
   if (options.strategy === 'ours' || options.strategy === 'theirs') {
     const flag = options.strategy === 'ours' ? '--ours' : '--theirs';
     const coRes = await runGit(workDir, ['checkout', flag, '--', rel], { timeout: 10_000 });
+    let removed = false;
     if (!coRes.ok) {
-      // Fallback: if stage #2/#3 does not exist (e.g. already staged once), resolve via hunks in file
-      if (existsSync(full)) {
+      // Handle modify/delete conflict when the chosen side deleted the file
+      if (/does not have (?:our|their) version/i.test(coRes.stderr || '')) {
+        const rmRes = await runGit(workDir, ['rm', '-f', '--', rel], { timeout: 10_000 });
+        if (!rmRes.ok) {
+          throw new Error(rmRes.stderr || coRes.stderr || `无法删除文件: ${rel}`);
+        }
+        removed = true;
+      } else if (existsSync(full)) {
+        // Fallback: if stage #2/#3 does not exist (e.g. already staged once), resolve via hunks in file
         let text = readFileSync(full, 'utf8');
         while (parseConflictHunks(text).hunkCount > 0) {
           text = applyHunkResolution(text, 0, options.strategy);
@@ -285,9 +299,11 @@ export async function resolveConflictFile(workDir, options) {
         throw new Error(coRes.stderr || `无法检出 ${flag}: ${rel}`);
       }
     }
-    const addRes = await runGit(workDir, ['add', '--', rel], { timeout: 10_000 });
-    if (!addRes.ok) {
-      throw new Error(addRes.stderr || `git add 失败: ${rel}`);
+    if (!removed) {
+      const addRes = await runGit(workDir, ['add', '--', rel], { timeout: 10_000 });
+      if (!addRes.ok) {
+        throw new Error(addRes.stderr || `git add 失败: ${rel}`);
+      }
     }
   } else if (typeof options.hunkIndex === 'number' && options.hunkChoice) {
     const current = existsSync(full) ? readFileSync(full, 'utf8') : '';
@@ -295,7 +311,10 @@ export async function resolveConflictFile(workDir, options) {
     writeFileSync(full, updated, 'utf8');
     const remaining = parseConflictHunks(updated).hunkCount;
     if (remaining === 0 && options.stage !== false) {
-      await runGit(workDir, ['add', '--', rel], { timeout: 10_000 });
+      const addRes = await runGit(workDir, ['add', '--', rel], { timeout: 10_000 });
+      if (!addRes.ok) {
+        throw new Error(addRes.stderr || `git add 失败: ${rel}`);
+      }
     }
   } else if (typeof options.content === 'string') {
     writeFileSync(full, options.content, 'utf8');
@@ -383,8 +402,12 @@ export async function completeConflictMerge(workDir, options = {}) {
   // Check if rebase, cherry-pick, revert, merge, or staged changes need to be finalized
   const [inProgressOp, statusPorcelain] = await Promise.all([
     getWorktreeInProgressOp(workDir),
-    runGit(workDir, ['status', '--porcelain'], { timeout: 5_000 }),
+    runGit(workDir, ['-c', 'core.quotepath=false', 'status', '--porcelain'], { timeout: 5_000 }),
   ]);
+
+  const hasStagedChanges = statusPorcelain.stdout
+    .split(/\r?\n/)
+    .some((line) => line.length >= 2 && line[0] !== ' ' && line[0] !== '?');
 
   if (inProgressOp && CONTINUE_ARGS_BY_OP[inProgressOp]) {
     const contRes = recordStep(
@@ -400,7 +423,7 @@ export async function completeConflictMerge(workDir, options = {}) {
         status: nextStatus,
       });
     }
-  } else if (inProgressOp === 'merge' || statusPorcelain.stdout.trim()) {
+  } else if (inProgressOp === 'merge' || hasStagedChanges) {
     const commitMsg = options.sourceBranch
       ? `Merge branch '${options.sourceBranch}' into ${options.targetBranch || 'HEAD'}`
       : 'Merge branch (resolved conflicts in wt-ui)';
@@ -415,10 +438,10 @@ export async function completeConflictMerge(workDir, options = {}) {
     }
   }
 
-  // After source rebase finishes, resume the full `wt merge` pipeline (pre-merge, merge, remove, post-merge)
+  // After source rebase finishes, resume `wt merge` unless conflicts were already merged directly on targetBranch
   const wtMergeOpts = options.wtMergeOptions;
   let didWtMerge = false;
-  if (options.wtBin && options.repoPath && wtMergeOpts?.branch) {
+  if (options.wtBin && options.repoPath && wtMergeOpts?.branch && !wtMergeOpts.alreadyMergedToTarget) {
     const remainingOp = await getWorktreeInProgressOp(workDir);
     if (remainingOp) {
       const nextStatus = await getConflictStatus(workDir);
@@ -492,7 +515,7 @@ function buildStepsResult(ok, steps, extra = {}) {
  * @returns {{ trimmed: string, parsed: URL, pathname: string }}
  */
 function parseAiBaseUrl(rawUrl) {
-  const trimmed = String(rawUrl || '').trim().replace(/\/+$/, '');
+  const trimmed = String(rawUrl || '').trim();
   if (!trimmed) {
     throw new Error('未配置 AI URL');
   }
@@ -506,7 +529,27 @@ function parseAiBaseUrl(rawUrl) {
     throw new Error(`不支持的 AI URL 协议: ${parsed.protocol}`);
   }
   const pathname = parsed.pathname.replace(/\/+$/, '');
-  return { trimmed, parsed, pathname };
+  const isAnthropicHost = /(?:^|\.)anthropic\.com$/i.test(parsed.hostname);
+  return { parsed, pathname, isAnthropicHost };
+}
+
+function buildUrlWithPath(parsed, nextPathname) {
+  const next = new URL(parsed.toString());
+  next.pathname = nextPathname;
+  return next.toString();
+}
+
+/**
+ * Check whether text contains real conflict marker blocks (avoiding false positives on standalone `=======` in Markdown).
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function hasConflictMarkers(text) {
+  const src = String(text ?? '');
+  if (parseConflictHunks(src).hunkCount > 0) return true;
+  const hasStart = /^<{7}(?:\s|$)/m.test(src);
+  if (!hasStart) return false;
+  return /^={7}\s*$/m.test(src) || /^>{7}(?:\s|$)/m.test(src);
 }
 
 /**
@@ -515,17 +558,21 @@ function parseAiBaseUrl(rawUrl) {
  * @returns {{ endpoint: string, isAnthropic: boolean }}
  */
 export function buildAiChatEndpoint(rawUrl) {
-  const { trimmed, pathname } = parseAiBaseUrl(rawUrl);
+  const { parsed, pathname, isAnthropicHost } = parseAiBaseUrl(rawUrl);
   if (pathname.endsWith('/messages')) {
-    return { endpoint: trimmed, isAnthropic: true };
+    return { endpoint: buildUrlWithPath(parsed, pathname), isAnthropic: true };
   }
   if (pathname.endsWith('/chat/completions')) {
-    return { endpoint: trimmed, isAnthropic: false };
+    return { endpoint: buildUrlWithPath(parsed, pathname), isAnthropic: false };
+  }
+  if (isAnthropicHost) {
+    const nextPath = /\/v\d+(?:beta)?$/i.test(pathname) ? `${pathname}/messages` : `${pathname}/v1/messages`;
+    return { endpoint: buildUrlWithPath(parsed, nextPath), isAnthropic: true };
   }
   if (/\/v\d+(?:beta)?(?:\/openai)?$/i.test(pathname)) {
-    return { endpoint: `${trimmed}/chat/completions`, isAnthropic: false };
+    return { endpoint: buildUrlWithPath(parsed, `${pathname}/chat/completions`), isAnthropic: false };
   }
-  return { endpoint: `${trimmed}/v1/chat/completions`, isAnthropic: false };
+  return { endpoint: buildUrlWithPath(parsed, `${pathname}/v1/chat/completions`), isAnthropic: false };
 }
 
 /**
@@ -534,21 +581,26 @@ export function buildAiChatEndpoint(rawUrl) {
  * @returns {{ endpoint: string, isAnthropic: boolean }}
  */
 export function buildAiModelsEndpoint(rawUrl) {
-  const { trimmed, parsed, pathname } = parseAiBaseUrl(rawUrl);
-  const isAnthropicHost = /(?:^|\.)anthropic\.com$/i.test(parsed.hostname);
+  const { parsed, pathname, isAnthropicHost } = parseAiBaseUrl(rawUrl);
   if (pathname.endsWith('/models')) {
-    return { endpoint: trimmed, isAnthropic: isAnthropicHost };
+    return { endpoint: buildUrlWithPath(parsed, pathname), isAnthropic: isAnthropicHost };
   }
   if (pathname.endsWith('/messages')) {
-    return { endpoint: `${trimmed.slice(0, -'/messages'.length)}/models`, isAnthropic: true };
+    return {
+      endpoint: buildUrlWithPath(parsed, `${pathname.slice(0, -'/messages'.length)}/models`),
+      isAnthropic: true,
+    };
   }
   if (pathname.endsWith('/chat/completions')) {
-    return { endpoint: `${trimmed.slice(0, -'/chat/completions'.length)}/models`, isAnthropic: isAnthropicHost };
+    return {
+      endpoint: buildUrlWithPath(parsed, `${pathname.slice(0, -'/chat/completions'.length)}/models`),
+      isAnthropic: isAnthropicHost,
+    };
   }
   if (/\/v\d+(?:beta)?(?:\/openai)?$/i.test(pathname)) {
-    return { endpoint: `${trimmed}/models`, isAnthropic: isAnthropicHost };
+    return { endpoint: buildUrlWithPath(parsed, `${pathname}/models`), isAnthropic: isAnthropicHost };
   }
-  return { endpoint: `${trimmed}/v1/models`, isAnthropic: isAnthropicHost };
+  return { endpoint: buildUrlWithPath(parsed, `${pathname}/v1/models`), isAnthropic: isAnthropicHost };
 }
 
 /**
@@ -571,10 +623,11 @@ export async function fetchAiModels(options = {}) {
   try {
     const headers = {};
     if (key) {
-      headers.Authorization = `Bearer ${key}`;
       if (isAnthropic) {
         headers['x-api-key'] = key;
         headers['anthropic-version'] = '2023-06-01';
+      } else {
+        headers.Authorization = `Bearer ${key}`;
       }
     }
     res = await fetch(endpoint, {
@@ -640,7 +693,9 @@ export async function fetchAiModels(options = {}) {
  */
 export function stripMarkdownCodeFence(rawText, originalContent = '') {
   let cleaned = String(rawText ?? '').trim();
-  const fenceMatch = cleaned.match(/^```[^\r\n]*\r?\n([\s\S]*?)\r?\n```$/);
+  const origTrimmed = String(originalContent ?? '').trim();
+  const origWrappedInFences = origTrimmed.startsWith('```') && origTrimmed.endsWith('```');
+  const fenceMatch = !origWrappedInFences && cleaned.match(/^```[^\r\n]*\r?\n([\s\S]*?)\r?\n```$/);
   if (fenceMatch) {
     cleaned = fenceMatch[1];
   }
@@ -696,7 +751,6 @@ export async function resolveFileWithAi(fileContent, options) {
   try {
     const headers = {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${key}`,
     };
     let bodyPayload;
     if (isAnthropic) {
@@ -710,6 +764,7 @@ export async function resolveFileWithAi(fileContent, options) {
         messages: [{ role: 'user', content: userPrompt }],
       };
     } else {
+      headers.Authorization = `Bearer ${key}`;
       bodyPayload = {
         model,
         temperature: 0,
@@ -751,13 +806,22 @@ export async function resolveFileWithAi(fileContent, options) {
   }
 
   let extracted = '';
-  if (isAnthropic && Array.isArray(data?.content)) {
-    extracted = data.content
-      .filter((part) => part?.type === 'text' && typeof part.text === 'string')
-      .map((part) => part.text)
-      .join('');
+  if (isAnthropic) {
+    if (data?.stop_reason === 'max_tokens') {
+      throw new Error(`AI 输出超出 max_tokens 上限被截断，已拒绝覆盖文件: ${options.filePath}`);
+    }
+    if (Array.isArray(data?.content)) {
+      extracted = data.content
+        .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+        .map((part) => part.text)
+        .join('');
+    }
   } else {
-    const msgContent = data?.choices?.[0]?.message?.content;
+    const choice = data?.choices?.[0];
+    if (choice?.finish_reason === 'length') {
+      throw new Error(`AI 输出被截断 (finish_reason=length)，已拒绝覆盖文件: ${options.filePath}`);
+    }
+    const msgContent = choice?.message?.content;
     if (typeof msgContent === 'string') {
       extracted = msgContent;
     } else if (Array.isArray(msgContent)) {
@@ -772,8 +836,7 @@ export async function resolveFileWithAi(fileContent, options) {
     throw new Error(`AI 返回了空内容，未能解决冲突文件: ${options.filePath}`);
   }
 
-  const remaining = parseConflictHunks(resolvedContent).hunkCount;
-  if (remaining > 0 || /^<{7}\s|^={7}\s*$|^>{7}\s/m.test(resolvedContent)) {
+  if (hasConflictMarkers(resolvedContent)) {
     throw new Error(`AI 返回的内容仍包含未解决的冲突标记: ${options.filePath}`);
   }
 
@@ -830,7 +893,7 @@ export async function aiResolveAndCompleteConflictMerge(workDir, options = {}) {
     });
 
     let nextContent = details.content;
-    if (details.hunkCount > 0 || /^<{7}\s|^={7}\s*$|^>{7}\s/m.test(details.content)) {
+    if (details.hunkCount > 0 || hasConflictMarkers(details.content)) {
       const startedAt = Date.now();
       nextContent = await resolveFileWithAi(details.content, {
         filePath: fileItem.path,

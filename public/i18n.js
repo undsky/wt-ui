@@ -6,10 +6,6 @@ export const MESSAGES = {
     brandSub: 'Worktrunk 可视化操作平台',
     envChecking: '检查环境中...',
     manageTools: '设置',
-    langToggleLabel: '中文',
-    langToggleTitle: '当前：中文，点击切换到 English',
-    themeLightTitle: '当前：白天模式，点击切换到黑夜模式',
-    themeDarkTitle: '当前：黑夜模式，点击切换到白天模式',
     viewInstallGuide: '查看安装引导',
     recheckEnv: '重新检测',
     sidebarTitle: '项目与工作区',
@@ -19,13 +15,8 @@ export const MESSAGES = {
     emptySidebarHint: '点击上方「添加」选择项目文件夹或 .code-workspace 文件',
     chooseProjectOrWs: '选择项目或工作区',
     openTabsLabel: '已打开的项目',
-    branchNameLabel: '分支名称',
-    branchPlaceholder: '例如 main_20261113102530',
-    generateBtn: '生成',
-    generateBtnTitle: '根据基于分支和当前时间戳重新生成',
     baseBranchLabel: '基于分支 (--base)',
     selectToolLabel: '选择打开工具 (CLI / GUI)',
-    createNewBranchHtml: '创建新分支 (<code>-c</code>)',
     createAndOpen: '创建并打开',
     commandLogTitle: '命令执行日志',
     copyBtn: '复制',
@@ -49,7 +40,6 @@ export const MESSAGES = {
     pickWorkspaceBtn: '选择 .code-workspace 文件...',
     mergeModalTitle: '合并分支',
     mergeAllModalTitle: '全部合并工作树',
-    mergeSummaryHtml: '将分支 <code id="merge-source-branch"></code> 合并到目标分支：',
     mergeTargetLabel: '目标分支',
     mergeAutoPushHtml: '合并后自动推送目标分支到远程 (<code>git push</code>)',
     mergeNoSquashHtml: '保留提交历史 (<code>--no-squash</code>)',
@@ -85,7 +75,6 @@ export const MESSAGES = {
     aiKeyLabel: 'Key',
     aiKeyPlaceholder: 'sk-...',
     aiModelLabel: 'Model',
-    aiModelPlaceholder: 'gpt-4o / claude-3-5-sonnet',
     aiModelSelectPlaceholder: '请先点击「获取模型」',
     fetchAiModelsBtn: '获取模型',
     fetchingAiModelsBtn: '获取中...',
@@ -300,10 +289,6 @@ export const MESSAGES = {
     brandSub: 'Worktrunk Visual Console',
     envChecking: 'Checking environment...',
     manageTools: 'Settings',
-    langToggleLabel: 'EN',
-    langToggleTitle: 'Language: English, click to switch to 中文',
-    themeLightTitle: 'Theme: Light mode, click to switch to Dark mode',
-    themeDarkTitle: 'Theme: Dark mode, click to switch to Light mode',
     viewInstallGuide: 'Install Guide',
     recheckEnv: 'Recheck',
     sidebarTitle: 'Projects & Workspaces',
@@ -313,13 +298,8 @@ export const MESSAGES = {
     emptySidebarHint: 'Click "Add" above to select a project folder or .code-workspace file',
     chooseProjectOrWs: 'Select Project or Workspace',
     openTabsLabel: 'Open projects',
-    branchNameLabel: 'Branch Name',
-    branchPlaceholder: 'e.g. main_20261113102530',
-    generateBtn: 'Generate',
-    generateBtnTitle: 'Regenerate from base branch and current timestamp',
     baseBranchLabel: 'Base Branch (--base)',
     selectToolLabel: 'Open With Tool (CLI / GUI)',
-    createNewBranchHtml: 'Create new branch (<code>-c</code>)',
     createAndOpen: 'Create & Open',
     commandLogTitle: 'Command Log',
     copyBtn: 'Copy',
@@ -343,7 +323,6 @@ export const MESSAGES = {
     pickWorkspaceBtn: 'Choose .code-workspace File...',
     mergeModalTitle: 'Merge Branch',
     mergeAllModalTitle: 'Merge All Worktrees',
-    mergeSummaryHtml: 'Merge branch <code id="merge-source-branch"></code> into target branch:',
     mergeTargetLabel: 'Target branch',
     mergeAutoPushHtml: 'Auto push target branch to remote after merge (<code>git push</code>)',
     mergeNoSquashHtml: 'Keep commit history (<code>--no-squash</code>)',
@@ -379,7 +358,6 @@ export const MESSAGES = {
     aiKeyLabel: 'Key',
     aiKeyPlaceholder: 'sk-...',
     aiModelLabel: 'Model',
-    aiModelPlaceholder: 'gpt-4o / claude-3-5-sonnet',
     aiModelSelectPlaceholder: 'Click "Fetch Models" first',
     fetchAiModelsBtn: 'Fetch Models',
     fetchingAiModelsBtn: 'Fetching...',
@@ -656,12 +634,5 @@ export function applyStaticI18n() {
   document.querySelectorAll('[data-i18n-aria]').forEach((el) => {
     el.setAttribute('aria-label', t(el.dataset.i18nAria));
   });
-
-  const langBtn = document.getElementById('btn-lang-toggle');
-  if (langBtn) {
-    langBtn.textContent = t('langToggleLabel');
-    langBtn.title = t('langToggleTitle');
-    langBtn.setAttribute('aria-label', t('langToggleTitle'));
-  }
 }
 

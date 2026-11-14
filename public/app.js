@@ -265,7 +265,7 @@ function renderEnv(autoOpenGuide = false) {
     banner.classList.remove('hidden');
     bannerText.textContent = t('envCheckNotice', { issues: state.env.issues.join(' | ') });
     renderInstallGuide();
-    if (autoOpenGuide && !state.env.wtBin) {
+    if (autoOpenGuide && !state.env.wtBin && state.env.autoInstall !== false) {
       triggerAutoInstallWt();
     }
   }
@@ -999,23 +999,15 @@ function setActionButtonBusy(btnEl, busyLabel, fallbackLabel) {
   };
 }
 
-async function pullWorktreeRow(workDir, branch, btnEl) {
-  const active = getActiveProject();
-  if (!active || !workDir) return;
-  const restoreBtn = setActionButtonBusy(btnEl, t('pullingBtn'), t('pullBtn'));
+async function executePullRequest({ projectId, workDir, branch, autoPush = false }) {
   try {
     const res = await api('/api/worktrees/pull', {
       method: 'POST',
-      body: JSON.stringify({
-        projectId: active.id,
-        workDir,
-        branch,
-      }),
+      body: JSON.stringify({ projectId, workDir, branch, autoPush }),
     });
     const out = [res.stdout, res.stderr].filter(Boolean).join('\n');
     appendLog(t('pullSuccessLog', { cmd: res.command }), out);
-    showToast(t('pullSuccessToast', { branch }), 'success');
-    await refreshWorktrees();
+    return { ok: true, res };
   } catch (err) {
     const out = [err.payload?.stdout, err.payload?.stderr].filter(Boolean).join('\n') || err.message;
     appendLog(t('pullFailLog', { cmd: err.payload?.command || '' }), out);
@@ -1025,6 +1017,20 @@ async function pullWorktreeRow(workDir, branch, btnEl) {
       await refreshWorktrees();
     } else {
       showToast(t('pullFailToast', { msg: err.payload?.stderr || err.message }), 'error');
+    }
+    return { ok: false, err };
+  }
+}
+
+async function pullWorktreeRow(workDir, branch, btnEl) {
+  const active = getActiveProject();
+  if (!active || !workDir) return;
+  const restoreBtn = setActionButtonBusy(btnEl, t('pullingBtn'), t('pullBtn'));
+  try {
+    const result = await executePullRequest({ projectId: active.id, workDir, branch });
+    if (result.ok) {
+      showToast(t('pullSuccessToast', { branch }), 'success');
+      await refreshWorktrees();
     }
   } finally {
     restoreBtn();
@@ -1063,30 +1069,13 @@ async function handlePushNonFastForward({ workDir, branch } = {}) {
   }
 
   if (choice === 'pull') {
-    try {
-      const pullRes = await api('/api/worktrees/pull', {
-        method: 'POST',
-        body: JSON.stringify({
-          projectId: active.id,
-          workDir,
-          branch,
-          autoPush: true,
-        }),
-      });
-      const pullOut = [pullRes.stdout, pullRes.stderr].filter(Boolean).join('\n');
-      appendLog(t('pullSuccessLog', { cmd: pullRes.command }), pullOut);
-    } catch (err) {
-      const out = [err.payload?.stdout, err.payload?.stderr].filter(Boolean).join('\n') || err.message;
-      appendLog(t('pullFailLog', { cmd: err.payload?.command || '' }), out);
-      if (err.payload?.hasConflicts && err.payload?.conflictSession) {
-        showToast(t('conflictDetectedToast'), 'info');
-        await openConflictModal(err.payload.conflictSession);
-        await refreshWorktrees();
-      } else {
-        showToast(t('pullFailToast', { msg: err.payload?.stderr || err.message }), 'error');
-      }
-      return false;
-    }
+    const pullOutcome = await executePullRequest({
+      projectId: active.id,
+      workDir,
+      branch,
+      autoPush: true,
+    });
+    if (!pullOutcome.ok) return false;
 
     try {
       const pushRes = await api('/api/worktrees/push', {
@@ -1222,19 +1211,27 @@ function getMergeableWorktreeBranches(targetBranch = '') {
     .map((item) => item.branch);
 }
 
-function openMergeModal(branch) {
-  state.mergeAllMode = false;
-  state.mergeTargetBranch = branch;
+function openMergeDialog({ mergeAll, branch, titleKey }) {
+  state.mergeAllMode = mergeAll;
+  state.mergeTargetBranch = branch || null;
   const titleEl = $('modal-merge-title');
-  if (titleEl) titleEl.textContent = t('mergeModalTitle');
-  populateMergeTargetSelect(branch);
-  if ($('merge-auto-push')) $('merge-auto-push').checked = false;
-  $('merge-no-squash').checked = false;
-  $('merge-no-rebase').checked = false;
-  $('merge-no-ff').checked = false;
-  $('merge-no-remove').checked = false;
-  $('merge-no-hooks').checked = false;
+  if (titleEl) titleEl.textContent = t(titleKey);
+  populateMergeTargetSelect(branch || '');
+  for (const id of [
+    'merge-auto-push',
+    'merge-no-squash',
+    'merge-no-rebase',
+    'merge-no-ff',
+    'merge-no-remove',
+    'merge-no-hooks',
+  ]) {
+    if ($(id)) $(id).checked = false;
+  }
   openModal('modal-merge');
+}
+
+function openMergeModal(branch) {
+  openMergeDialog({ mergeAll: false, branch, titleKey: 'mergeModalTitle' });
 }
 
 function openMergeAllModal() {
@@ -1242,18 +1239,7 @@ function openMergeAllModal() {
     showToast(t('noMergeableBranchesToast'), 'info');
     return;
   }
-  state.mergeAllMode = true;
-  state.mergeTargetBranch = null;
-  const titleEl = $('modal-merge-title');
-  if (titleEl) titleEl.textContent = t('mergeAllModalTitle');
-  populateMergeTargetSelect('');
-  if ($('merge-auto-push')) $('merge-auto-push').checked = false;
-  $('merge-no-squash').checked = false;
-  $('merge-no-rebase').checked = false;
-  $('merge-no-ff').checked = false;
-  $('merge-no-remove').checked = false;
-  $('merge-no-hooks').checked = false;
-  openModal('modal-merge');
+  openMergeDialog({ mergeAll: true, branch: null, titleKey: 'mergeAllModalTitle' });
 }
 
 async function confirmMerge() {
@@ -1809,52 +1795,16 @@ function registerMonacoConflictFeatures(monaco) {
   });
 }
 
-function ensureMonacoStylesheetLoaded() {
-  const targetHref = '/vendor/monaco/vs/editor/editor.main.css';
-  let link = Array.from(document.querySelectorAll('link[rel="stylesheet"]')).find((el) =>
-    (el.getAttribute('href') || '').includes(targetHref)
-  );
-
-  if (!link) {
-    link = document.createElement('link');
-    link.rel = 'stylesheet';
-    link.href = targetHref;
-    const appCss = document.querySelector('link[href="/styles.css"]');
-    if (appCss && appCss.parentNode) {
-      appCss.parentNode.insertBefore(link, appCss);
-    } else {
-      document.head.appendChild(link);
-    }
-  }
-
-  if (link.sheet) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolvePromise) => {
-    let settled = false;
-    const done = () => {
-      if (settled) return;
-      settled = true;
-      resolvePromise();
-    };
-    link.addEventListener('load', done, { once: true });
-    link.addEventListener('error', done, { once: true });
-    setTimeout(done, 4000);
-  });
-}
-
 function loadMonacoEditor() {
   if (window.monaco?.editor) {
     registerMonacoConflictFeatures(window.monaco);
-    return ensureMonacoStylesheetLoaded().then(() => window.monaco);
+    return Promise.resolve(window.monaco);
   }
   if (conflictEditor.monacoPromise) {
     return conflictEditor.monacoPromise;
   }
 
-  const cssReady = ensureMonacoStylesheetLoaded();
-  const jsReady = new Promise((resolvePromise, rejectPromise) => {
+  conflictEditor.monacoPromise = new Promise((resolvePromise, rejectPromise) => {
     const bootAmd = () => {
       if (typeof window.require !== 'function') {
         rejectPromise(new Error('Monaco AMD loader unavailable'));
@@ -1896,7 +1846,6 @@ function loadMonacoEditor() {
     document.head.appendChild(script);
   });
 
-  conflictEditor.monacoPromise = Promise.all([cssReady, jsReady]).then(([, monaco]) => monaco);
   return conflictEditor.monacoPromise;
 }
 
@@ -1905,6 +1854,19 @@ function getRawConflictEditorValue() {
     return conflictEditor.instance.getValue();
   }
   return $('conflict-raw-textarea')?.value || '';
+}
+
+function hasConflictMarkers(text) {
+  const src = String(text ?? '');
+  const hasStart = /^<{7}(?:\s|$)/m.test(src);
+  if (!hasStart) return false;
+  return /^={7}\s*$/m.test(src) || /^>{7}(?:\s|$)/m.test(src);
+}
+
+function updateFallbackStatusBar(text, filePath) {
+  const lang = detectMonacoLanguage(filePath);
+  const blockMatches = hasConflictMarkers(text) ? String(text || '').match(/^<{7}(?:\s|$)/gm) : null;
+  updateConflictEditorStatusBar(lang, blockMatches ? blockMatches.length : 0);
 }
 
 async function syncConflictCodeEditor(content, filePath, workDir) {
@@ -1925,8 +1887,7 @@ async function syncConflictCodeEditor(content, filePath, workDir) {
         conflictEditor.lastSyncedContent = content || '';
       }
     }
-    const blockMatches = String(content || '').match(/^<{7}\s/gm);
-    updateConflictEditorStatusBar(lang, blockMatches ? blockMatches.length : 0);
+    updateFallbackStatusBar(fallbackTextarea?.value ?? content, filePath);
     return;
   }
 
@@ -1939,11 +1900,17 @@ async function syncConflictCodeEditor(content, filePath, workDir) {
     }
     try {
       const monaco = await loadMonacoEditor();
-      // Bail if modal was closed or switched back while loading
-      if (!state.conflictSession) return;
+      // Re-read the active conflict session after awaiting async Monaco initialization
+      const latestCs = state.conflictSession;
+      if (!latestCs) return;
+      const latestFile = latestCs.activeFile || filePath;
+      const latestWorkDir = latestCs.workDir || workDir;
+      const latestContent = latestCs.fileDetails?.content ?? content ?? '';
+      const latestKey = `${latestWorkDir || ''}::${latestFile || ''}`;
+      const latestLang = detectMonacoLanguage(latestFile);
       if (!conflictEditor.instance) {
         host.replaceChildren();
-        const model = monaco.editor.createModel(content || '', lang);
+        const model = monaco.editor.createModel(latestContent, latestLang);
         const editor = monaco.editor.create(host, {
           model,
           theme: getMonacoTheme(),
@@ -1980,8 +1947,8 @@ async function syncConflictCodeEditor(content, filePath, workDir) {
         }
 
         conflictEditor.instance = editor;
-        conflictEditor.loadedFileKey = nextKey;
-        conflictEditor.lastSyncedContent = content || '';
+        conflictEditor.loadedFileKey = latestKey;
+        conflictEditor.lastSyncedContent = latestContent;
         refreshMonacoConflictDecorations();
         requestAnimationFrame(() => editor.layout());
         document.fonts?.ready?.then(() => {
@@ -1990,15 +1957,21 @@ async function syncConflictCodeEditor(content, filePath, workDir) {
             editor.layout();
           }
         });
+        return;
       }
     } catch {
+      const latestCs = state.conflictSession;
+      const latestFile = latestCs?.activeFile || filePath;
+      const latestContent = latestCs?.fileDetails?.content ?? content ?? '';
+      const latestKey = `${latestCs?.workDir || workDir || ''}::${latestFile || ''}`;
       conflictEditor.fallbackMode = true;
       host.classList.add('hidden');
       if (fallbackTextarea) {
         fallbackTextarea.classList.remove('hidden');
-        fallbackTextarea.value = content || '';
-        conflictEditor.loadedFileKey = nextKey;
-        conflictEditor.lastSyncedContent = content || '';
+        fallbackTextarea.value = latestContent;
+        conflictEditor.loadedFileKey = latestKey;
+        conflictEditor.lastSyncedContent = latestContent;
+        updateFallbackStatusBar(latestContent, latestFile);
       }
       return;
     }
@@ -2006,21 +1979,28 @@ async function syncConflictCodeEditor(content, filePath, workDir) {
 
   const editor = conflictEditor.instance;
   const monaco = window.monaco;
-  if (!editor || !monaco) return;
+  const currentCs = state.conflictSession;
+  if (!editor || !monaco || !currentCs) return;
+
+  const finalFile = currentCs.activeFile || filePath;
+  const finalWorkDir = currentCs.workDir || workDir;
+  const finalContent = currentCs.fileDetails?.content ?? content ?? '';
+  const finalKey = `${finalWorkDir || ''}::${finalFile || ''}`;
+  const finalLang = detectMonacoLanguage(finalFile);
 
   const model = editor.getModel();
   if (model) {
-    if (model.getLanguageId() !== lang) {
-      monaco.editor.setModelLanguage(model, lang);
+    if (model.getLanguageId() !== finalLang) {
+      monaco.editor.setModelLanguage(model, finalLang);
     }
     const shouldReplaceValue =
-      conflictEditor.loadedFileKey !== nextKey || conflictEditor.lastSyncedContent !== content;
-    if (shouldReplaceValue && model.getValue() !== (content || '')) {
-      model.setValue(content || '');
+      conflictEditor.loadedFileKey !== finalKey || conflictEditor.lastSyncedContent !== finalContent;
+    if (shouldReplaceValue && model.getValue() !== finalContent) {
+      model.setValue(finalContent);
     }
   }
-  conflictEditor.loadedFileKey = nextKey;
-  conflictEditor.lastSyncedContent = content || '';
+  conflictEditor.loadedFileKey = finalKey;
+  conflictEditor.lastSyncedContent = finalContent;
   refreshMonacoConflictDecorations();
   requestAnimationFrame(() => editor.layout());
 }
@@ -2222,7 +2202,7 @@ async function saveRawConflictFile() {
   if (!active || !cs || !cs.activeFile) return;
 
   const content = getRawConflictEditorValue();
-  if (/^<{7}\s|^={7}\s*$|^>{7}\s/m.test(content)) {
+  if (hasConflictMarkers(content)) {
     showToast(t('conflictMarkersRemainWarn'), 'error');
     return;
   }
@@ -2245,13 +2225,25 @@ async function saveRawConflictFile() {
   }
 }
 
+function setConflictActionControlsDisabled(disabled) {
+  for (const id of [
+    'btn-complete-conflict',
+    'btn-ai-complete-conflict',
+    'btn-abort-conflict',
+    'btn-file-accept-ours',
+    'btn-file-accept-theirs',
+    'btn-save-conflict-file',
+  ]) {
+    if ($(id)) $(id).disabled = disabled;
+  }
+}
+
 async function completeConflictResolution() {
   const active = getActiveProject();
   const cs = state.conflictSession;
   if (!active || !cs) return;
 
-  const btn = $('btn-complete-conflict');
-  if (btn) btn.disabled = true;
+  setConflictActionControlsDisabled(true);
   try {
     const res = await api('/api/conflicts/complete', {
       method: 'POST',
@@ -2295,7 +2287,11 @@ async function completeConflictResolution() {
       await handleAutoPushFailure(err.payload.pushFailed, msg);
     } else {
       showToast(t('mergeFailToast', { msg }), 'error');
-      if (btn && cs.unresolvedCount === 0) btn.disabled = false;
+    }
+  } finally {
+    setConflictActionControlsDisabled(false);
+    if ($('btn-complete-conflict') && state.conflictSession) {
+      $('btn-complete-conflict').disabled = state.conflictSession.unresolvedCount > 0;
     }
   }
 }
@@ -2358,11 +2354,12 @@ function updateAiProgressBar(doneCount, totalFiles, stateClass = '') {
 function appendAiProgressStep(text, status = 'running') {
   const steps = $('ai-progress-steps');
   if (!steps) return;
+  const resolveRunningAsError = status === 'error';
   steps.querySelectorAll('.ai-progress-step.is-running').forEach((el) => {
     el.classList.remove('is-running');
-    el.classList.add('is-done');
+    el.classList.add(resolveRunningAsError ? 'is-error' : 'is-done');
     const icon = el.querySelector('.ai-progress-step-icon');
-    if (icon) icon.textContent = '✓';
+    if (icon) icon.textContent = resolveRunningAsError ? '✕' : '✓';
   });
 
   const row = document.createElement('div');
@@ -3189,6 +3186,11 @@ function bindEvents() {
   $('btn-complete-conflict').addEventListener('click', completeConflictResolution);
   $('btn-ai-complete-conflict').addEventListener('click', aiCompleteConflictResolution);
   $('btn-abort-conflict').addEventListener('click', abortConflictResolution);
+  $('conflict-raw-textarea')?.addEventListener('input', (e) => {
+    if (conflictEditor.fallbackMode) {
+      updateFallbackStatusBar(e.target.value, state.conflictSession?.activeFile || '');
+    }
+  });
 
   $('btn-manage-tools').addEventListener('click', () => {
     resetToolForm();

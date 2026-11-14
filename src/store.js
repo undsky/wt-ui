@@ -1,20 +1,58 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, posix as pathPosix, resolve, win32 as pathWin32 } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
+function resolveDeepestExistingRealpath(absPath) {
+  let cur = absPath;
+  const suffix = [];
+  while (cur) {
+    if (existsSync(cur)) {
+      try {
+        const real = realpathSync(cur);
+        return suffix.length > 0 ? join(real, ...suffix) : real;
+      } catch {
+        break;
+      }
+    }
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    suffix.unshift(basename(cur));
+    cur = parent;
+  }
+  return absPath;
+}
+
+function normalizePathForCompare(p, platform = process.platform) {
+  const raw = String(p ?? '').trim();
+  if (!raw) return '';
+  if (platform === process.platform) {
+    let normalized = resolveDeepestExistingRealpath(resolve(raw));
+    const sep = platform === 'win32' ? '\\' : '/';
+    while (normalized.length > 1 && normalized.endsWith(sep) && dirname(normalized) !== normalized) {
+      normalized = normalized.slice(0, -1);
+    }
+    return platform === 'win32' || platform === 'darwin' ? normalized.toLowerCase() : normalized;
+  }
+
+  const impl = platform === 'win32' ? pathWin32 : pathPosix;
+  let normalized = impl.normalize(raw);
+  const sep = platform === 'win32' ? '\\' : '/';
+  while (normalized.length > 1 && normalized.endsWith(sep) && impl.dirname(normalized) !== normalized) {
+    normalized = normalized.slice(0, -1);
+  }
+  return platform === 'win32' || platform === 'darwin' ? normalized.toLowerCase() : normalized;
+}
+
 /**
  * Compare filesystem paths. Windows and macOS (default APFS) are case-insensitive;
- * Linux is case-sensitive.
+ * Linux is case-sensitive. Resolves symlinks (e.g. /var -> /private/var) on the host OS.
  */
 export function samePath(a, b, platform = process.platform) {
-  if (platform === 'win32' || platform === 'darwin') {
-    return String(a).toLowerCase() === String(b).toLowerCase();
-  }
-  return a === b;
+  return normalizePathForCompare(a, platform) === normalizePathForCompare(b, platform);
 }
 
 export function getStoreDir() {
@@ -95,12 +133,17 @@ export function setAutoStartEnabled(enabled, platform = process.platform) {
   const logFile = join(getStoreDir(), 'autostart.log');
 
   if (platform === 'darwin') {
+    const storeDir = getStoreDir();
+    if (!existsSync(storeDir)) {
+      mkdirSync(storeDir, { recursive: true });
+    }
     const escapeXml = (s) =>
       String(s)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
     const envPath = process.env.PATH || '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
     const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -146,9 +189,11 @@ export function setAutoStartEnabled(enabled, platform = process.platform) {
       `WshShell.Run """${escapeVbs(nodeBin)}"" ""${escapeVbs(cliScript)}"" start --no-open", 0, False`,
       '',
     ].join('\r\n');
-    writeFileSync(targetFile, vbsContent, 'utf8');
+    // Write UTF-16 LE with BOM so Windows Script Host handles non-ASCII/CJK user profile paths
+    writeFileSync(targetFile, Buffer.from(`\uFEFF${vbsContent}`, 'utf16le'));
   } else {
-    const escapeDesktopArg = (s) => `"${String(s).replace(/(["\\$`])/g, '\\$1')}"`;
+    const escapeDesktopArg = (s) =>
+      `"${String(s).replace(/%/g, '%%').replace(/(["\\$`])/g, '\\$1')}"`;
     const desktopContent = [
       '[Desktop Entry]',
       'Type=Application',
@@ -220,12 +265,23 @@ export function loadStore() {
   }
 }
 
+let storeMutationQueue = Promise.resolve();
+
+export function withStoreLock(fn) {
+  const run = storeMutationQueue.then(() => fn());
+  storeMutationQueue = run.catch(() => {});
+  return run;
+}
+
 export function saveStore(store) {
   const dir = getStoreDir();
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  writeFileSync(getStorePath(), JSON.stringify(store, null, 2), 'utf8');
+  const targetPath = getStorePath();
+  const tmpPath = `${targetPath}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf8');
+  renameSync(tmpPath, targetPath);
   return store;
 }
 
@@ -296,9 +352,7 @@ export function importWorkspaceProjects(store, workspaceData) {
     importedProjects.push(proj);
   }
 
-  if (importedProjects.length > 0 && !store.activeProjectId) {
-    store.activeProjectId = importedProjects[0].id;
-  } else if (importedProjects.length > 0) {
+  if (importedProjects.length > 0) {
     store.activeProjectId = importedProjects[0].id;
   }
 

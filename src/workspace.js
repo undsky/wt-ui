@@ -12,14 +12,15 @@ const execFileAsync = promisify(execFile);
  * @returns {string}
  */
 export function stripJsonc(input) {
+  const source = String(input || '').replace(/^\uFEFF/, '');
   let out = '';
   let inString = false;
   let escape = false;
   let i = 0;
 
-  while (i < input.length) {
-    const ch = input[i];
-    const next = input[i + 1];
+  while (i < source.length) {
+    const ch = source[i];
+    const next = source[i + 1];
 
     if (inString) {
       out += ch;
@@ -43,7 +44,7 @@ export function stripJsonc(input) {
 
     if (ch === '/' && next === '/') {
       i += 2;
-      while (i < input.length && input[i] !== '\n' && input[i] !== '\r') {
+      while (i < source.length && source[i] !== '\n' && source[i] !== '\r') {
         i += 1;
       }
       continue;
@@ -51,7 +52,7 @@ export function stripJsonc(input) {
 
     if (ch === '/' && next === '*') {
       i += 2;
-      while (i < input.length && !(input[i] === '*' && input[i + 1] === '/')) {
+      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) {
         i += 1;
       }
       i += 2;
@@ -221,7 +222,12 @@ export function browsePath(targetPath) {
     targetPath = '/';
   }
 
-  const abs = resolve(targetPath);
+  let normalizedInput = String(targetPath).trim();
+  if (process.platform === 'win32' && /^[a-zA-Z]:$/.test(normalizedInput)) {
+    normalizedInput = `${normalizedInput}\\`;
+  }
+
+  const abs = resolve(normalizedInput);
   if (!existsSync(abs)) {
     throw new Error(`Path does not exist: ${abs}`);
   }
@@ -241,7 +247,14 @@ export function browsePath(targetPath) {
     if (dirent.name.startsWith('$') || dirent.name === 'System Volume Information') continue;
     const fullPath = resolve(abs, dirent.name);
     try {
-      if (dirent.isDirectory()) {
+      let isDir = dirent.isDirectory();
+      let isFile = dirent.isFile();
+      if (dirent.isSymbolicLink()) {
+        const st = statSync(fullPath);
+        isDir = st.isDirectory();
+        isFile = st.isFile();
+      }
+      if (isDir) {
         let isGitRepo = false;
         try {
           isGitRepo = existsSync(resolve(fullPath, '.git')) || isBareRepoDirSync(fullPath);
@@ -254,7 +267,7 @@ export function browsePath(targetPath) {
           type: 'directory',
           isGitRepo,
         });
-      } else if (dirent.isFile() && dirent.name.toLowerCase().endsWith('.code-workspace')) {
+      } else if (isFile && dirent.name.toLowerCase().endsWith('.code-workspace')) {
         entries.push({
           name: dirent.name,
           path: fullPath,
@@ -305,13 +318,17 @@ export async function pickNativePath(mode = 'folder') {
             'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }',
           ].join('; ');
 
-    const { stdout } = await execFileAsync(
-      'powershell.exe',
-      ['-NoProfile', '-STA', '-Command', script],
-      { timeout: 120_000, windowsHide: true }
-    );
-    const selected = (stdout || '').trim();
-    return { cancelled: !selected, path: selected || null };
+    try {
+      const { stdout } = await execFileAsync(
+        'powershell.exe',
+        ['-NoProfile', '-STA', '-Command', script],
+        { timeout: 120_000, windowsHide: true }
+      );
+      const selected = (stdout || '').trim();
+      return { cancelled: !selected, path: selected || null };
+    } catch {
+      return { cancelled: true, path: null };
+    }
   }
 
   if (process.platform === 'darwin') {

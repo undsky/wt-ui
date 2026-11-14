@@ -40,6 +40,7 @@ import {
   samePath,
   saveStore,
   setAutoStartEnabled,
+  withStoreLock,
 } from './store.js';
 import {
   BUILTIN_TOOLS,
@@ -186,12 +187,53 @@ function serveStatic(reqPath, res) {
   serveStaticFromRoot(PUBLIC_DIR, cleanPath, res, 'no-store');
 }
 
-export function createAppServer({ wtBin: explicitWtBin } = {}) {
-  const server = createServer(async (req, res) => {
-    const url = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`);
-    const pathname = url.pathname;
+function requireProject(store, projectId, notFoundMsg = '项目不存在') {
+  const project = store.projects.find((p) => p.id === (projectId || store.activeProjectId));
+  if (!project) {
+    throw new HttpError(404, notFoundMsg);
+  }
+  return project;
+}
 
+async function cleanupWorktreeTools(projectId, exactKeys = [], pathToMatch = '') {
+  return withStoreLock(() => {
+    const freshStore = loadStore();
+    const proj = freshStore.projects.find((p) => p.id === projectId);
+    if (!proj || !proj.worktreeTools || typeof proj.worktreeTools !== 'object') {
+      return {};
+    }
+    let dirty = false;
+    const delKey = (k) => {
+      if (k && k in proj.worktreeTools) {
+        delete proj.worktreeTools[k];
+        dirty = true;
+      }
+    };
+    for (const k of exactKeys) delKey(k);
+    if (pathToMatch) {
+      delKey(pathToMatch);
+      for (const existingKey of Object.keys(proj.worktreeTools)) {
+        if (samePath(existingKey, pathToMatch)) {
+          delKey(existingKey);
+        }
+      }
+    }
+    if (dirty) saveStore(freshStore);
+    return proj.worktreeTools;
+  });
+}
+
+export function createAppServer({ wtBin: explicitWtBin, noAutoInstall = false } = {}) {
+  const server = createServer(async (req, res) => {
     try {
+      let url;
+      try {
+        url = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`);
+      } catch {
+        throw new HttpError(400, 'Bad request URL or Host header');
+      }
+      const pathname = url.pathname;
+
       if (!pathname.startsWith('/api/')) {
         serveStatic(pathname, res);
         return;
@@ -204,7 +246,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
 
       if (req.method === 'GET' && pathname === '/api/health') {
         const env = await checkEnvironment({ wtBin: explicitWtBin });
-        sendJson(res, 200, env);
+        sendJson(res, 200, { ...env, autoInstall: !noAutoInstall });
         return;
       }
 
@@ -244,7 +286,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
 
       if (req.method === 'POST' && pathname === '/api/projects') {
         const body = await readJsonBody(req);
-        if (!body.path) {
+        if (!body.path || typeof body.path !== 'string') {
           sendJson(res, 400, { error: '请提供项目文件夹路径' });
           return;
         }
@@ -253,20 +295,23 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           sendJson(res, 400, { error: `该目录不是 Git 仓库: ${body.path}` });
           return;
         }
-        const store = loadStore();
-        const project = addStandaloneProject(store, {
-          name: body.name,
-          path: gitInfo.rootPath || body.path,
-          defaultToolId: body.defaultToolId,
+        const payload = await withStoreLock(() => {
+          const store = loadStore();
+          const project = addStandaloneProject(store, {
+            name: body.name,
+            path: gitInfo.rootPath || body.path,
+            defaultToolId: body.defaultToolId,
+          });
+          saveStore(store);
+          return { project, store };
         });
-        saveStore(store);
-        sendJson(res, 200, { project, store });
+        sendJson(res, 200, payload);
         return;
       }
 
       if (req.method === 'POST' && pathname === '/api/workspaces/import') {
         const body = await readJsonBody(req);
-        if (!body.workspaceFile) {
+        if (!body.workspaceFile || typeof body.workspaceFile !== 'string') {
           sendJson(res, 400, { error: '请提供 .code-workspace 文件路径' });
           return;
         }
@@ -279,88 +324,85 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           });
           return;
         }
-        const store = loadStore();
-        const imported = importWorkspaceProjects(store, wsData);
-        saveStore(store);
-        sendJson(res, 200, {
-          workspace: imported.workspace,
-          importedProjects: imported.projects,
-          skippedCount: wsData.projects.length - gitCount,
-          store,
+        const payload = await withStoreLock(() => {
+          const store = loadStore();
+          const imported = importWorkspaceProjects(store, wsData);
+          saveStore(store);
+          return {
+            workspace: imported.workspace,
+            importedProjects: imported.projects,
+            skippedCount: wsData.projects.length - gitCount,
+            store,
+          };
         });
+        sendJson(res, 200, payload);
         return;
       }
 
       if (req.method === 'POST' && pathname === '/api/active-project') {
         const body = await readJsonBody(req);
-        const store = loadStore();
-        if (!store.projects.some((p) => p.id === body.projectId)) {
-          sendJson(res, 404, { error: '项目不存在' });
-          return;
-        }
-        store.activeProjectId = body.projectId;
-        saveStore(store);
-        sendJson(res, 200, { activeProjectId: store.activeProjectId });
+        const activeProjectId = await withStoreLock(() => {
+          const store = loadStore();
+          if (!store.projects.some((p) => p.id === body.projectId)) {
+            throw new HttpError(404, '项目不存在');
+          }
+          store.activeProjectId = body.projectId;
+          saveStore(store);
+          return store.activeProjectId;
+        });
+        sendJson(res, 200, { activeProjectId });
         return;
       }
 
       const projectMatch = pathname.match(/^\/api\/projects\/([^/]+)$/);
-      if (projectMatch) {
+      if (projectMatch && req.method === 'DELETE') {
         const projectId = decodeURIComponent(projectMatch[1]);
-        const store = loadStore();
-        if (req.method === 'PATCH') {
-          const body = await readJsonBody(req);
-          const proj = store.projects.find((p) => p.id === projectId);
-          if (!proj) {
-            sendJson(res, 404, { error: '项目不存在' });
-            return;
-          }
-          if (body.name !== undefined) proj.name = body.name;
-          if (body.defaultToolId !== undefined) proj.defaultToolId = body.defaultToolId;
-          saveStore(store);
-          sendJson(res, 200, { project: proj });
-          return;
-        }
-        if (req.method === 'DELETE') {
-          removeProject(store, projectId);
-          saveStore(store);
-          sendJson(res, 200, { store });
-          return;
-        }
+        const store = await withStoreLock(() => {
+          const current = loadStore();
+          removeProject(current, projectId);
+          return saveStore(current);
+        });
+        sendJson(res, 200, { store });
+        return;
       }
 
       const wsMatch = pathname.match(/^\/api\/workspaces\/([^/]+)$/);
       if (wsMatch && req.method === 'DELETE') {
         const wsId = decodeURIComponent(wsMatch[1]);
-        const store = loadStore();
-        removeWorkspace(store, wsId);
-        saveStore(store);
+        const store = await withStoreLock(() => {
+          const current = loadStore();
+          removeWorkspace(current, wsId);
+          return saveStore(current);
+        });
         sendJson(res, 200, { store });
         return;
       }
 
       if (req.method === 'POST' && pathname === '/api/general-config') {
         const body = await readJsonBody(req);
-        const store = loadStore();
-        const prevAutoStart = Boolean(store.generalConfig?.autoStart);
-        const nextAutoStart =
-          typeof body.autoStart === 'boolean' ? body.autoStart : prevAutoStart;
-        const nextTerminal =
-          typeof body.preferredTerminal === 'string' && body.preferredTerminal.trim()
-            ? body.preferredTerminal.trim()
-            : store.generalConfig?.preferredTerminal || '';
+        const generalConfig = await withStoreLock(() => {
+          const store = loadStore();
+          const prevAutoStart = Boolean(store.generalConfig?.autoStart);
+          const nextAutoStart =
+            typeof body.autoStart === 'boolean' ? body.autoStart : prevAutoStart;
+          const nextTerminal =
+            typeof body.preferredTerminal === 'string' && body.preferredTerminal.trim()
+              ? body.preferredTerminal.trim()
+              : store.generalConfig?.preferredTerminal || '';
 
-        if (typeof body.autoStart === 'boolean') {
-          setAutoStartEnabled(nextAutoStart);
-        }
+          if (typeof body.autoStart === 'boolean') {
+            setAutoStartEnabled(nextAutoStart);
+          }
 
-        store.generalConfig = {
-          autoStart: nextAutoStart,
-          preferredTerminal: nextTerminal,
-        };
-        saveStore(store);
+          store.generalConfig = {
+            autoStart: nextAutoStart,
+            preferredTerminal: nextTerminal,
+          };
+          saveStore(store);
+          return store.generalConfig;
+        });
         sendJson(res, 200, {
-          generalConfig: store.generalConfig,
+          generalConfig,
           terminals: getSupportedTerminals(),
         });
         return;
@@ -368,14 +410,17 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
 
       if (req.method === 'POST' && pathname === '/api/ai-config') {
         const body = await readJsonBody(req);
-        const store = loadStore();
-        store.aiConfig = {
-          url: typeof body.url === 'string' ? body.url.trim() : '',
-          key: typeof body.key === 'string' ? body.key.trim() : '',
-          model: typeof body.model === 'string' ? body.model.trim() : '',
-        };
-        saveStore(store);
-        sendJson(res, 200, { aiConfig: store.aiConfig });
+        const aiConfig = await withStoreLock(() => {
+          const store = loadStore();
+          store.aiConfig = {
+            url: typeof body.url === 'string' ? body.url.trim() : '',
+            key: typeof body.key === 'string' ? body.key.trim() : '',
+            model: typeof body.model === 'string' ? body.model.trim() : '',
+          };
+          saveStore(store);
+          return store.aiConfig;
+        });
+        sendJson(res, 200, { aiConfig });
         return;
       }
 
@@ -395,30 +440,54 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
 
       if (req.method === 'POST' && pathname === '/api/tools') {
         const body = await readJsonBody(req);
-        if (!body.name || !body.command) {
+        if (
+          typeof body.name !== 'string' ||
+          !body.name.trim() ||
+          typeof body.command !== 'string' ||
+          !body.command.trim()
+        ) {
           sendJson(res, 400, { error: '工具名称和命令不能为空' });
           return;
         }
-        const store = loadStore();
-        const isBuiltin = BUILTIN_TOOLS.some((t) => t.id === body.id);
-        const tool = {
-          id: body.id || `custom_${randomUUID().slice(0, 6)}`,
-          name: body.name.trim(),
-          kind: body.kind === 'gui' ? 'gui' : 'cli',
-          command: body.command.trim(),
-          args: Array.isArray(body.args)
-            ? body.args
-            : typeof body.args === 'string' && body.args.trim()
-              ? body.args.trim().split(/\s+/)
-              : [],
-          description: body.description || (isBuiltin ? '内置工具（已编辑）' : '自定义工具'),
-          custom: !isBuiltin,
-        };
-        const idx = store.customTools.findIndex((t) => t.id === tool.id);
-        if (idx >= 0) store.customTools[idx] = tool;
-        else store.customTools.push(tool);
-        saveStore(store);
-        sendJson(res, 200, { tool, tools: getAllTools(store.customTools) });
+        const payload = await withStoreLock(() => {
+          const store = loadStore();
+          const toolId =
+            typeof body.id === 'string' && body.id.trim()
+              ? body.id.trim()
+              : `custom_${randomUUID().slice(0, 6)}`;
+          const isBuiltin = BUILTIN_TOOLS.some((t) => t.id === toolId);
+          const existingTool = getAllTools(store.customTools).find((t) => t.id === toolId);
+          const tool = {
+            id: toolId,
+            name: body.name.trim(),
+            kind: body.kind === 'gui' ? 'gui' : 'cli',
+            command: body.command.trim(),
+            args: Array.isArray(body.args)
+              ? body.args.map((a) => String(a))
+              : typeof body.args === 'string' && body.args.trim()
+                ? body.args.trim().split(/\s+/)
+                : [],
+            supportsPrompt:
+              typeof body.supportsPrompt === 'boolean'
+                ? body.supportsPrompt
+                : existingTool
+                  ? Boolean(existingTool.supportsPrompt)
+                  : false,
+            description:
+              typeof body.description === 'string' && body.description.trim()
+                ? body.description.trim()
+                : isBuiltin
+                  ? existingTool?.description || '内置工具（已编辑）'
+                  : '自定义工具',
+            custom: !isBuiltin,
+          };
+          const idx = store.customTools.findIndex((t) => t.id === tool.id);
+          if (idx >= 0) store.customTools[idx] = tool;
+          else store.customTools.push(tool);
+          saveStore(store);
+          return { tool, tools: getAllTools(store.customTools) };
+        });
+        sendJson(res, 200, payload);
         return;
       }
 
@@ -429,10 +498,13 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           sendJson(res, 400, { error: '内置工具不可删除' });
           return;
         }
-        const store = loadStore();
-        store.customTools = store.customTools.filter((t) => t.id !== toolId);
-        saveStore(store);
-        sendJson(res, 200, { tools: getAllTools(store.customTools) });
+        const tools = await withStoreLock(() => {
+          const store = loadStore();
+          store.customTools = store.customTools.filter((t) => t.id !== toolId);
+          saveStore(store);
+          return getAllTools(store.customTools);
+        });
+        sendJson(res, 200, { tools });
         return;
       }
 
@@ -541,20 +613,27 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           noHooks,
         });
 
+        let worktreeTools = project.worktreeTools || {};
         if (result.ok && tool?.id) {
-          if (!project.worktreeTools || typeof project.worktreeTools !== 'object') {
-            project.worktreeTools = {};
-          }
-          if (body.toolId || !project.worktreeTools[branch]) {
-            project.worktreeTools[branch] = tool.id;
-            saveStore(store);
-          }
+          worktreeTools = await withStoreLock(() => {
+            const freshStore = loadStore();
+            const freshProj = freshStore.projects.find((p) => p.id === project.id);
+            if (!freshProj) return project.worktreeTools || {};
+            if (!freshProj.worktreeTools || typeof freshProj.worktreeTools !== 'object') {
+              freshProj.worktreeTools = {};
+            }
+            if (body.toolId || !freshProj.worktreeTools[branch]) {
+              freshProj.worktreeTools[branch] = tool.id;
+              saveStore(freshStore);
+            }
+            return freshProj.worktreeTools;
+          });
         }
 
         sendJson(res, result.ok ? 200 : 422, {
           ...result,
           toolId: tool?.id || null,
-          worktreeTools: project.worktreeTools || {},
+          worktreeTools,
         });
         return;
       }
@@ -587,12 +666,15 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           noFf: Boolean(body.noFf),
           noHooks: Boolean(body.noHooks),
         };
+        const mergePhases = mergeOptions.noRemove
+          ? ['pre-commit', 'post-commit', 'pre-merge', 'post-merge']
+          : ['pre-commit', 'post-commit', 'pre-merge', 'post-merge', 'pre-remove', 'post-remove'];
         const approvalGate = await resolveApprovalGate({
           wtBin: env.wtBin,
           repoPath: project.path,
           approveHooks: Boolean(body.approveHooks),
           skipHooks: mergeOptions.noHooks,
-          phases: ['pre-commit', 'post-commit', 'pre-merge', 'post-merge', 'pre-remove', 'post-remove'],
+          phases: mergePhases,
         });
         if (!approvalGate.allowed) {
           sendJson(res, 409, {
@@ -629,9 +711,8 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
             conflictInfo.conflictSession.autoPush = Boolean(body.autoPush);
           }
         } else {
-          if (!mergeOptions.noRemove && project.worktreeTools && mergeOptions.branch in project.worktreeTools) {
-            delete project.worktreeTools[mergeOptions.branch];
-            saveStore(store);
+          if (!mergeOptions.noRemove) {
+            await cleanupWorktreeTools(project.id, [mergeOptions.branch]);
           }
           if (body.autoPush) {
             const pushRes = await pushWorktreeBranch(project.path, {
@@ -717,27 +798,13 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         const parsed = parseWtJson(result.stdout);
         const itemResult = Array.isArray(parsed) ? parsed[0] : parsed;
         const outcome = itemResult?.branch_outcome;
-        if (result.ok && project.worktreeTools) {
-          let dirtyStore = false;
-          const deleteToolKey = (key) => {
-            if (key && key in project.worktreeTools) {
-              delete project.worktreeTools[key];
-              dirtyStore = true;
-            }
-          };
-          if (itemResult?.path) {
-            deleteToolKey(itemResult.path);
-            for (const existingKey of Object.keys(project.worktreeTools)) {
-              if (samePath(existingKey, itemResult.path)) {
-                deleteToolKey(existingKey);
-              }
-            }
-          }
-          if (outcome === 'deleted' || outcome === 'not_attempted') {
-            deleteToolKey(targetBranch);
-            if (itemResult?.branch) deleteToolKey(itemResult.branch);
-          }
-          if (dirtyStore) saveStore(store);
+        let worktreeTools = project.worktreeTools || {};
+        if (result.ok) {
+          const exactKeys =
+            outcome === 'deleted' || outcome === 'not_attempted'
+              ? [targetBranch, itemResult?.branch].filter(Boolean)
+              : [];
+          worktreeTools = await cleanupWorktreeTools(project.id, exactKeys, itemResult?.path || '');
         }
         sendJson(res, result.ok ? 200 : 422, {
           ok: result.ok,
@@ -745,7 +812,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           data: parsed,
           stdout: result.stdout,
           stderr: result.stderr,
-          worktreeTools: project.worktreeTools || {},
+          worktreeTools,
         });
         return;
       }
@@ -870,10 +937,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           wtMergeOptions: body.wtMergeOptions || null,
         });
         if (result.ok && result.resumedWtMerge && body.wtMergeOptions?.branch && !body.wtMergeOptions?.noRemove) {
-          if (project.worktreeTools && body.wtMergeOptions.branch in project.worktreeTools) {
-            delete project.worktreeTools[body.wtMergeOptions.branch];
-            saveStore(store);
-          }
+          await cleanupWorktreeTools(project.id, [body.wtMergeOptions.branch]);
         }
         sendJson(res, result.ok ? 200 : 422, result);
         return;
@@ -882,46 +946,49 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
       if (req.method === 'POST' && pathname === '/api/conflicts/ai-complete') {
         const body = await readJsonBody(req);
         const store = loadStore();
-        const project = store.projects.find((p) => p.id === (body.projectId || store.activeProjectId));
-        if (!project) {
-          sendJson(res, 404, { error: '项目不存在' });
-          return;
-        }
+        const project = requireProject(store, body.projectId);
         const workDir = await resolveProjectWorkDir(project, body.workDir);
         const env = await checkEnvironment({ wtBin: explicitWtBin }).catch(() => ({ wtBin: '' }));
         const trackedFiles = Array.isArray(body.trackedFiles) ? body.trackedFiles : [];
         const wantsStream = Boolean(body.stream) || String(req.headers.accept || '').includes('text/event-stream');
 
+        const runAiMerge = async (onProgress) => {
+          const result = await aiResolveAndCompleteConflictMerge(workDir, {
+            sourceBranch: body.sourceBranch,
+            targetBranch: body.targetBranch,
+            autoPush: Boolean(body.autoPush),
+            wtBin: env?.wtBin || '',
+            repoPath: project.path,
+            wtMergeOptions: body.wtMergeOptions || null,
+            trackedFiles,
+            aiConfig: store.aiConfig,
+            onProgress,
+          });
+          if (result.ok && result.resumedWtMerge && body.wtMergeOptions?.branch && !body.wtMergeOptions?.noRemove) {
+            await cleanupWorktreeTools(project.id, [body.wtMergeOptions.branch]);
+          }
+          return result;
+        };
+
         if (wantsStream) {
+          res.setTimeout?.(0);
           res.writeHead(200, {
             'Content-Type': 'text/event-stream; charset=utf-8',
             'Cache-Control': 'no-cache, no-transform',
             Connection: 'keep-alive',
           });
+          let closed = false;
+          req.on('close', () => {
+            closed = true;
+          });
           const sendEvent = (payload) => {
-            if (!res.writableEnded) {
+            if (!closed && !res.writableEnded) {
               res.write(`data: ${JSON.stringify(payload)}\n\n`);
             }
           };
           try {
-            const result = await aiResolveAndCompleteConflictMerge(workDir, {
-              sourceBranch: body.sourceBranch,
-              targetBranch: body.targetBranch,
-              autoPush: Boolean(body.autoPush),
-              wtBin: env?.wtBin || '',
-              repoPath: project.path,
-              wtMergeOptions: body.wtMergeOptions || null,
-              trackedFiles,
-              aiConfig: store.aiConfig,
-              onProgress: (ev) => sendEvent(ev),
-            });
+            const result = await runAiMerge((ev) => sendEvent(ev));
             if (result.ok) {
-              if (result.resumedWtMerge && body.wtMergeOptions?.branch && !body.wtMergeOptions?.noRemove) {
-                if (project.worktreeTools && body.wtMergeOptions.branch in project.worktreeTools) {
-                  delete project.worktreeTools[body.wtMergeOptions.branch];
-                  saveStore(store);
-                }
-              }
               sendEvent({ type: 'done', result });
             } else {
               sendEvent({
@@ -945,22 +1012,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         }
 
         try {
-          const result = await aiResolveAndCompleteConflictMerge(workDir, {
-            sourceBranch: body.sourceBranch,
-            targetBranch: body.targetBranch,
-            autoPush: Boolean(body.autoPush),
-            wtBin: env?.wtBin || '',
-            repoPath: project.path,
-            wtMergeOptions: body.wtMergeOptions || null,
-            trackedFiles,
-            aiConfig: store.aiConfig,
-          });
-          if (result.ok && result.resumedWtMerge && body.wtMergeOptions?.branch && !body.wtMergeOptions?.noRemove) {
-            if (project.worktreeTools && body.wtMergeOptions.branch in project.worktreeTools) {
-              delete project.worktreeTools[body.wtMergeOptions.branch];
-              saveStore(store);
-            }
-          }
+          const result = await runAiMerge();
           sendJson(res, result.ok ? 200 : 422, result);
         } catch (err) {
           const status = await getConflictStatus(workDir, trackedFiles).catch(() => null);

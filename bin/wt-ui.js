@@ -33,16 +33,48 @@ function printHelp() {
 function parseArgs(argv) {
   const positionals = [];
   const flags = {};
+  const takeValue = (flagName, inlineVal, nextIdx) => {
+    if (inlineVal !== undefined) {
+      if (!inlineVal) throw new Error(`参数 ${flagName} 缺少值`);
+      return { value: inlineVal, nextIdx };
+    }
+    if (nextIdx + 1 >= argv.length) {
+      throw new Error(`参数 ${flagName} 缺少值`);
+    }
+    return { value: argv[nextIdx + 1], nextIdx: nextIdx + 1 };
+  };
+
   for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
+    const raw = argv[i];
+    const eqIdx = raw.startsWith('--') ? raw.indexOf('=') : -1;
+    const arg = eqIdx >= 0 ? raw.slice(0, eqIdx) : raw;
+    const inlineVal = eqIdx >= 0 ? raw.slice(eqIdx + 1) : undefined;
+
     if (arg === '-h' || arg === '--help') flags.help = true;
     else if (arg === '-v' || arg === '--version') flags.version = true;
     else if (arg === '--no-open') flags.noOpen = true;
     else if (arg === '--no-auto-install') flags.noAutoInstall = true;
-    else if (arg === '-p' || arg === '--port') flags.port = Number(argv[++i]);
-    else if (arg === '-H' || arg === '--host') flags.host = argv[++i];
-    else if (arg === '--wt-bin') flags.wtBin = argv[++i];
-    else if (!arg.startsWith('-')) positionals.push(arg);
+    else if (arg === '-p' || arg === '--port') {
+      const taken = takeValue(arg, inlineVal, i);
+      i = taken.nextIdx;
+      const portNum = Number(taken.value);
+      if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+        throw new Error(`无效的端口号: ${taken.value}（范围应为 1-65535）`);
+      }
+      flags.port = portNum;
+    } else if (arg === '-H' || arg === '--host') {
+      const taken = takeValue(arg, inlineVal, i);
+      i = taken.nextIdx;
+      flags.host = taken.value;
+    } else if (arg === '--wt-bin') {
+      const taken = takeValue(arg, inlineVal, i);
+      i = taken.nextIdx;
+      flags.wtBin = taken.value;
+    } else if (raw.startsWith('-')) {
+      throw new Error(`未知参数: ${raw}（运行 wt-ui --help 查看可用选项）`);
+    } else {
+      positionals.push(raw);
+    }
   }
   return { positionals, flags };
 }
@@ -150,7 +182,11 @@ async function main() {
     return;
   }
 
+  const hasExplicitCommand = ['start', 'doctor', 'help', 'version'].includes(command);
   const targetPath = command === 'start' ? positionals[1] : positionals[0];
+  if (!hasExplicitCommand && targetPath && !existsSync(resolve(targetPath))) {
+    throw new Error(`未知子命令或不存在的路径: ${targetPath}（运行 wt-ui --help 查看用法）`);
+  }
   if (targetPath) {
     await preloadTarget(targetPath);
   }
@@ -171,7 +207,10 @@ async function main() {
   const hasExplicitPort = Number.isInteger(flags.port) && flags.port > 0;
   const preferredPort = hasExplicitPort ? flags.port : 4173;
 
-  const server = createAppServer({ wtBin: flags.wtBin });
+  const server = createAppServer({
+    wtBin: flags.wtBin,
+    noAutoInstall: Boolean(flags.noAutoInstall),
+  });
   const actualPort = await listenWithFallback(server, host, preferredPort, !hasExplicitPort);
   // Wildcard listen addresses are not browsable (especially on Windows).
   const browseHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host;
