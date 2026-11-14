@@ -1,6 +1,6 @@
 # wt-ui
 
-Worktrunk (`wt`) 可视化操作平台 — 基于 Node.js 的本地 Web 控制台，支持项目文件夹与 `.code-workspace` 工作区管理、CLI/GUI 工具一键创建并打开工作树，以及开发完成后的一键合并。
+多智能体协作、AI智能合并工具。
 
 ## 快速开始
 
@@ -34,4 +34,3 @@ wt-ui doctor
 - Node.js >= 20
 - Worktrunk (`wt`)
 - Git >= 2.43.0（Worktrunk 最低要求）
-

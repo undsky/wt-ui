@@ -558,10 +558,9 @@ function applyBranchModeUI() {
     thDiff.dataset.i18n = isRemote ? 'colDiffTarget' : 'colDiffDefault';
     thDiff.textContent = t(isRemote ? 'colDiffTarget' : 'colDiffDefault');
   }
-  const thPath = $('th-path');
-  if (thPath) {
-    thPath.dataset.i18n = isRemote ? 'colRemoteMeta' : 'colWorktreePath';
-    thPath.textContent = t(isRemote ? 'colRemoteMeta' : 'colWorktreePath');
+  const thRemoteMeta = $('th-remote-meta');
+  if (thRemoteMeta) {
+    thRemoteMeta.classList.toggle('hidden', !isRemote);
   }
 }
 
@@ -612,7 +611,7 @@ function renderWorktrees() {
   }
 
   if (items.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="5" class="muted">${escapeHtml(t('noWorktreeData'))}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="3" class="muted">${escapeHtml(t('noWorktreeData'))}</td></tr>`;
     return;
   }
 
@@ -665,14 +664,6 @@ function renderWorktrees() {
             ${divPills.length > 0 ? `<div class="status-pills">${divPills.join('')}</div>` : ''}
           </div>`;
 
-    const commitHtml = item.head
-      ? `<div><span class="mono">${escapeHtml(item.head.short_sha)}</span> ${escapeHtml(item.head.subject || '')}</div>`
-      : '<span class="muted">-</span>';
-
-    const pathHtml = wt?.path
-      ? `<span class="mono">${escapeHtml(wt.path)}</span>`
-      : '<span class="muted">—</span>';
-
     const boundTool = getWorktreeTool(branchName);
     const openLabel = hasWorktree ? t('openWithTool', { tool: boundTool?.name || t('toolFallback') }) : t('createAndOpen');
     const remoteAhead = item.remote?.ahead || 0;
@@ -690,8 +681,6 @@ function renderWorktrees() {
         </div>
       </td>
       <td>${divHtml}</td>
-      <td>${commitHtml}</td>
-      <td>${pathHtml}</td>
       <td class="col-actions">
         <div class="actions-cell">
           ${
@@ -769,7 +758,7 @@ function renderRemoteBranches() {
   }
 
   if (items.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="5" class="muted">${escapeHtml(t('noRemoteData'))}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" class="muted">${escapeHtml(t('noRemoteData'))}</td></tr>`;
     return;
   }
 
@@ -802,10 +791,6 @@ function renderRemoteBranches() {
       }
     }
 
-    const commitHtml = item.head?.short_sha
-      ? `<div><span class="mono">${escapeHtml(item.head.short_sha)}</span> ${escapeHtml(item.head.subject || '')}</div>`
-      : '<span class="muted">-</span>';
-
     const metaParts = [`<span class="badge badge-neutral">${escapeHtml(item.remote)}</span>`];
     if (item.head?.author) {
       metaParts.push(`<span class="muted">${escapeHtml(item.head.author)}</span>`);
@@ -827,7 +812,6 @@ function renderRemoteBranches() {
         </div>
       </td>
       <td><div class="diff-stats">${divParts.join('') || `<span class="muted">${escapeHtml(t('noDiff'))}</span>`}</div></td>
-      <td>${commitHtml}</td>
       <td><div class="status-pills">${metaParts.join(' ')}</div></td>
       <td class="col-actions">
         <div class="actions-cell">
