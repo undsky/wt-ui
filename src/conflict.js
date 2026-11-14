@@ -15,10 +15,11 @@ export function resolveSafeRepoFile(workDir, relPath) {
   }
   const full = resolve(root, cleaned);
   const rel = relative(root, full);
-  if (!rel || rel.startsWith('..') || isAbsolute(rel) || (!full.startsWith(root + sep) && full !== root)) {
+  const normRel = rel.replace(/\\/g, '/');
+  if (!normRel || normRel === '..' || normRel.startsWith('../') || isAbsolute(rel)) {
     throw new Error(`非法的文件路径: ${relPath}`);
   }
-  return { root, full, rel: rel.replace(/\\/g, '/') };
+  return { root, full, rel: normRel };
 }
 
 /**
@@ -410,7 +411,7 @@ export async function completeConflictMerge(workDir, options = {}) {
   return buildStepsResult(true, steps);
 }
 
-function buildStepsResult(ok, steps) {
+function buildStepsResult(ok, steps, extra = {}) {
   return {
     ok,
     command: steps.map((s) => s.command).join(' && ') || 'git commit',
@@ -423,6 +424,248 @@ function buildStepsResult(ok, steps) {
       .filter(Boolean)
       .join('\n'),
     steps,
+    ...extra,
+  };
+}
+
+/**
+ * Normalize a user-configured AI base URL or full endpoint URL.
+ * @param {string} rawUrl
+ * @returns {{ endpoint: string, isAnthropic: boolean }}
+ */
+export function buildAiChatEndpoint(rawUrl) {
+  const trimmed = String(rawUrl || '').trim().replace(/\/+$/, '');
+  if (!trimmed) {
+    throw new Error('未配置 AI URL');
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`无效的 AI URL: ${trimmed}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`不支持的 AI URL 协议: ${parsed.protocol}`);
+  }
+
+  const pathname = parsed.pathname.replace(/\/+$/, '');
+  if (pathname.endsWith('/messages')) {
+    return { endpoint: trimmed, isAnthropic: true };
+  }
+  if (pathname.endsWith('/chat/completions')) {
+    return { endpoint: trimmed, isAnthropic: false };
+  }
+  if (/\/v\d+(?:beta)?(?:\/openai)?$/i.test(pathname)) {
+    return { endpoint: `${trimmed}/chat/completions`, isAnthropic: false };
+  }
+  return { endpoint: `${trimmed}/v1/chat/completions`, isAnthropic: false };
+}
+
+/**
+ * Strip a single outer Markdown code fence (` ```lang ... ``` `) if the model wrapped the file content.
+ * @param {string} rawText
+ * @param {string} originalContent
+ */
+export function stripMarkdownCodeFence(rawText, originalContent = '') {
+  let cleaned = String(rawText ?? '').trim();
+  const fenceMatch = cleaned.match(/^```[^\r\n]*\r?\n([\s\S]*?)\r?\n```$/);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1];
+  }
+  const endsWithNewline = /\r?\n$/.test(originalContent);
+  if (endsWithNewline && !/\r?\n$/.test(cleaned)) {
+    const le = originalContent.includes('\r\n') ? '\r\n' : '\n';
+    cleaned += le;
+  }
+  return cleaned;
+}
+
+/**
+ * Call the configured AI API to resolve all conflict hunks in a single file.
+ * @param {string} fileContent
+ * @param {{
+ *   filePath: string,
+ *   sourceBranch?: string,
+ *   targetBranch?: string,
+ *   aiConfig: { url: string, key: string, model: string },
+ * }} options
+ */
+export async function resolveFileWithAi(fileContent, options) {
+  const aiConfig = options.aiConfig || {};
+  const url = String(aiConfig.url || '').trim();
+  const key = String(aiConfig.key || '').trim();
+  const model = String(aiConfig.model || '').trim();
+
+  if (!url || !key || !model) {
+    throw new Error('请先在「设置 → AI」中完整填写 URL、Key 和 Model');
+  }
+
+  const { endpoint, isAnthropic } = buildAiChatEndpoint(url);
+  const systemPrompt = [
+    'You are an expert Git merge conflict resolver.',
+    'Resolve all Git conflict markers (<<<<<<<, |||||||, =======, >>>>>>>) in the provided file.',
+    'Preserve code correctness, syntax validity, formatting, and combine both branches sensibly when appropriate.',
+    'Output ONLY the final resolved file content. Do NOT wrap the output in markdown code fences and do NOT include any explanations.',
+  ].join(' ');
+
+  const userPrompt = [
+    `File path: ${options.filePath}`,
+    `Target branch (Ours / HEAD): ${options.targetBranch || 'HEAD'}`,
+    `Incoming branch (Theirs): ${options.sourceBranch || 'incoming'}`,
+    '',
+    'File content with conflict markers:',
+    fileContent,
+  ].join('\n');
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('AI 请求超时 (90s)')), 90_000);
+
+  let res;
+  try {
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${key}`,
+    };
+    let bodyPayload;
+    if (isAnthropic) {
+      headers['x-api-key'] = key;
+      headers['anthropic-version'] = '2023-06-01';
+      bodyPayload = {
+        model,
+        max_tokens: 8192,
+        temperature: 0,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      };
+    } else {
+      bodyPayload = {
+        model,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+      };
+    }
+
+    res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(bodyPayload),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    throw new Error(`AI 接口请求失败 (${ options.filePath }): ${err?.message || String(err)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const rawBody = await res.text();
+  let data = null;
+  try {
+    data = JSON.parse(rawBody);
+  } catch {
+    // handle non-json error response below
+  }
+
+  if (!res.ok) {
+    const apiErr =
+      data?.error?.message ||
+      data?.message ||
+      (typeof data?.error === 'string' ? data.error : '') ||
+      rawBody.slice(0, 240) ||
+      `HTTP ${res.status}`;
+    throw new Error(`AI 接口返回错误 (${res.status}): ${apiErr}`);
+  }
+
+  let extracted = '';
+  if (isAnthropic && Array.isArray(data?.content)) {
+    extracted = data.content
+      .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+      .map((part) => part.text)
+      .join('');
+  } else {
+    const msgContent = data?.choices?.[0]?.message?.content;
+    if (typeof msgContent === 'string') {
+      extracted = msgContent;
+    } else if (Array.isArray(msgContent)) {
+      extracted = msgContent
+        .map((part) => (typeof part === 'string' ? part : part?.text || ''))
+        .join('');
+    }
+  }
+
+  const resolvedContent = stripMarkdownCodeFence(extracted, fileContent);
+  if (!resolvedContent.trim() && fileContent.trim()) {
+    throw new Error(`AI 返回了空内容，未能解决冲突文件: ${options.filePath}`);
+  }
+
+  const remaining = parseConflictHunks(resolvedContent).hunkCount;
+  if (remaining > 0 || /^<{7}\s|^={7}\s*$|^>{7}\s/m.test(resolvedContent)) {
+    throw new Error(`AI 返回的内容仍包含未解决的冲突标记: ${options.filePath}`);
+  }
+
+  return resolvedContent;
+}
+
+/**
+ * Automatically resolve all conflicted files in `workDir` using the configured AI and complete the merge commit.
+ * @param {string} workDir
+ * @param {{
+ *   sourceBranch?: string,
+ *   targetBranch?: string,
+ *   isRemote?: boolean,
+ *   autoPush?: boolean,
+ *   deleteRemote?: boolean,
+ *   trackedFiles?: string[],
+ *   aiConfig?: { url: string, key: string, model: string },
+ * }} options
+ */
+export async function aiResolveAndCompleteConflictMerge(workDir, options = {}) {
+  const aiConfig = options.aiConfig || {};
+  if (!aiConfig.url || !aiConfig.key || !aiConfig.model) {
+    throw new Error('请先在「设置 → AI」中完整填写 URL、Key 和 Model');
+  }
+
+  const trackedFiles = Array.isArray(options.trackedFiles) ? options.trackedFiles : [];
+  const initialStatus = await getConflictStatus(workDir, trackedFiles);
+  const unresolvedFiles = initialStatus.files.filter((f) => !f.resolved || f.unmerged || f.hunkCount > 0);
+  const resolvedFiles = [];
+
+  for (const fileItem of unresolvedFiles) {
+    const details = await readConflictFileDetails(workDir, fileItem.path);
+    let nextContent = details.content;
+    if (details.hunkCount > 0 || /^<{7}\s|^={7}\s*$|^>{7}\s/m.test(details.content)) {
+      nextContent = await resolveFileWithAi(details.content, {
+        filePath: fileItem.path,
+        sourceBranch: options.sourceBranch,
+        targetBranch: options.targetBranch,
+        aiConfig,
+      });
+    }
+    await resolveConflictFile(workDir, {
+      filePath: fileItem.path,
+      content: nextContent,
+      stage: true,
+      trackedFiles: initialStatus.files.map((f) => f.path),
+    });
+    resolvedFiles.push(fileItem.path);
+  }
+
+  const completeRes = await completeConflictMerge(workDir, {
+    sourceBranch: options.sourceBranch,
+    targetBranch: options.targetBranch,
+    isRemote: options.isRemote,
+    autoPush: options.autoPush,
+    deleteRemote: options.deleteRemote,
+  });
+
+  const finalStatus = await getConflictStatus(workDir, initialStatus.files.map((f) => f.path));
+  return {
+    ...completeRes,
+    resolvedFiles,
+    aiModel: aiConfig.model,
+    status: finalStatus,
   };
 }
 

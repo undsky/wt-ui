@@ -1,12 +1,18 @@
 import { getLang, setLang, t, applyStaticI18n, MESSAGES } from '/i18n.js';
 
 const OPEN_TABS_KEY = 'wt_ui_open_tabs';
+const SIDEBAR_COLLAPSED_KEY = 'wt_ui_sidebar_collapsed';
 
 const state = {
   env: null,
+  appVersion: '0.1.0',
   workspaces: [],
   projects: [],
   tools: [],
+  terminals: [],
+  generalConfig: { autoStart: false, preferredTerminal: '' },
+  aiConfig: { url: '', key: '', model: '' },
+  activeSettingsTab: 'general',
   openTabIds: [],
   worktreeCache: {},
   remoteCache: {},
@@ -820,9 +826,20 @@ async function loadHealth(autoOpenGuide = false) {
 
 async function loadState() {
   const data = await api('/api/state');
+  state.appVersion = data.appVersion || state.appVersion || '0.1.0';
   state.workspaces = data.workspaces;
   state.projects = data.projects;
   state.tools = data.tools;
+  state.terminals = data.terminals || [];
+  state.generalConfig = {
+    autoStart: Boolean(data.generalConfig?.autoStart),
+    preferredTerminal: data.generalConfig?.preferredTerminal || '',
+  };
+  state.aiConfig = {
+    url: data.aiConfig?.url || '',
+    key: data.aiConfig?.key || '',
+    model: data.aiConfig?.model || '',
+  };
   state.activeProjectId = data.activeProjectId;
 
   const validIds = new Set(state.projects.map((p) => p.id));
@@ -839,7 +856,10 @@ async function loadState() {
 
   renderSidebar();
   renderMainProject();
+  renderGeneralSettingsForm();
+  renderAiConfigForm();
   renderToolsModalList();
+  renderAboutPane();
 }
 
 async function refreshWorktrees() {
@@ -1185,7 +1205,7 @@ function openMergeModal(branch) {
   const titleEl = $('modal-merge-title');
   if (titleEl) titleEl.textContent = t('mergeModalTitle');
   populateMergeTargetSelect(branch);
-  if ($('merge-auto-push')) $('merge-auto-push').checked = true;
+  if ($('merge-auto-push')) $('merge-auto-push').checked = false;
   $('merge-no-squash').checked = false;
   $('merge-no-rebase').checked = false;
   $('merge-no-ff').checked = false;
@@ -1201,7 +1221,7 @@ function openRemoteMergeModal(fullRef) {
   const titleEl = $('modal-merge-title');
   if (titleEl) titleEl.textContent = t('remoteMergeModalTitle');
   populateMergeTargetSelect(fullRef);
-  $('remote-merge-push').checked = true;
+  $('remote-merge-push').checked = false;
   $('remote-merge-no-ff').checked = false;
   $('remote-merge-squash').checked = false;
   $('remote-merge-delete').checked = false;
@@ -1221,7 +1241,7 @@ function openMergeAllModal() {
     const titleEl = $('modal-merge-title');
     if (titleEl) titleEl.textContent = t('remoteMergeAllModalTitle');
     populateMergeTargetSelect('');
-    $('remote-merge-push').checked = true;
+    $('remote-merge-push').checked = false;
     $('remote-merge-no-ff').checked = false;
     $('remote-merge-squash').checked = false;
     $('remote-merge-delete').checked = false;
@@ -1239,7 +1259,7 @@ function openMergeAllModal() {
   const titleEl = $('modal-merge-title');
   if (titleEl) titleEl.textContent = t('mergeAllModalTitle');
   populateMergeTargetSelect('');
-  if ($('merge-auto-push')) $('merge-auto-push').checked = true;
+  if ($('merge-auto-push')) $('merge-auto-push').checked = false;
   $('merge-no-squash').checked = false;
   $('merge-no-rebase').checked = false;
   $('merge-no-ff').checked = false;
@@ -1444,7 +1464,7 @@ async function openConflictModal(session) {
   const files = session.files || [];
   const trackedFiles = files.map((f) => f.path);
   const unresolvedCount = files.filter((f) => !f.resolved).length;
-  const autoPush = session.autoPush !== undefined ? Boolean(session.autoPush) : Boolean(session.isRemote);
+  const autoPush = Boolean(session.autoPush);
   state.conflictSession = {
     workDir: session.workDir,
     sourceBranch: session.sourceBranch || '',
@@ -1517,6 +1537,11 @@ function renderConflictHeaderAndSidebar() {
   const completeBtn = $('btn-complete-conflict');
   if (completeBtn) {
     completeBtn.disabled = cs.unresolvedCount > 0;
+  }
+  const aiCompleteBtn = $('btn-ai-complete-conflict');
+  if (aiCompleteBtn) {
+    aiCompleteBtn.disabled = false;
+    aiCompleteBtn.textContent = t('aiCompleteMergeBtn');
   }
 
   const listEl = $('conflict-file-list');
@@ -1797,6 +1822,78 @@ async function completeConflictResolution() {
   }
 }
 
+async function aiCompleteConflictResolution() {
+  const active = getActiveProject();
+  const cs = state.conflictSession;
+  if (!active || !cs) return;
+
+  if (!state.aiConfig?.url || !state.aiConfig?.key || !state.aiConfig?.model) {
+    showToast(t('aiConfigMissingWarn'), 'error');
+    resetToolForm();
+    renderAiConfigForm();
+    setSettingsTab('ai');
+    openModal('modal-tools');
+    return;
+  }
+
+  const aiBtn = $('btn-ai-complete-conflict');
+  const completeBtn = $('btn-complete-conflict');
+  if (aiBtn) {
+    aiBtn.disabled = true;
+    aiBtn.textContent = t('aiCompletingMergeBtn');
+  }
+  if (completeBtn) completeBtn.disabled = true;
+
+  try {
+    const res = await api('/api/conflicts/ai-complete', {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: active.id,
+        workDir: cs.workDir,
+        sourceBranch: cs.sourceBranch,
+        targetBranch: cs.targetBranch,
+        isRemote: cs.isRemote,
+        autoPush: Boolean($('conflict-auto-push')?.checked ?? cs.autoPush),
+        deleteRemote: cs.deleteRemote,
+        trackedFiles: cs.trackedFiles,
+      }),
+    });
+    if (Array.isArray(res.resolvedFiles) && res.resolvedFiles.length > 0) {
+      appendLog(
+        t('aiConflictResolveLog', {
+          model: res.aiModel || state.aiConfig.model,
+          files: res.resolvedFiles.join(', '),
+        })
+      );
+    }
+    appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
+    showToast(t('aiConflictCompleteSuccessToast'), 'success');
+    closeModal('modal-conflict');
+    state.conflictSession = null;
+    await Promise.all([refreshWorktrees(), refreshRemoteBranches(false)]);
+  } catch (err) {
+    const msg = err.payload?.error || err.payload?.stderr || err.message;
+    appendLog(t('mergeFailLog', { cmd: err.payload?.command || 'AI Merge' }), msg);
+    showToast(t('mergeFailToast', { msg }), 'error');
+    if (err.payload?.status && state.conflictSession) {
+      state.conflictSession.files = err.payload.status.files;
+      state.conflictSession.unresolvedCount = err.payload.status.unresolvedCount;
+      renderConflictHeaderAndSidebar();
+      if (state.conflictSession.activeFile) {
+        await loadConflictFile(state.conflictSession.activeFile);
+      }
+    }
+  } finally {
+    if (aiBtn) {
+      aiBtn.disabled = false;
+      aiBtn.textContent = t('aiCompleteMergeBtn');
+    }
+    if (completeBtn && state.conflictSession) {
+      completeBtn.disabled = state.conflictSession.unresolvedCount > 0;
+    }
+  }
+}
+
 async function abortConflictResolution() {
   const active = getActiveProject();
   const cs = state.conflictSession;
@@ -1959,6 +2056,126 @@ async function addTargetPath(rawPath) {
   }
 }
 
+function setSettingsTab(tab) {
+  const next = tab === 'tools' || tab === 'ai' || tab === 'about' ? tab : 'general';
+  state.activeSettingsTab = next;
+  const isGeneral = next === 'general';
+  const isAi = next === 'ai';
+  const isTools = next === 'tools';
+  const isAbout = next === 'about';
+
+  const tabGeneral = $('tab-settings-general');
+  const tabAi = $('tab-settings-ai');
+  const tabTools = $('tab-settings-tools');
+  const tabAbout = $('tab-settings-about');
+  if (tabGeneral) {
+    tabGeneral.classList.toggle('active', isGeneral);
+    tabGeneral.setAttribute('aria-selected', isGeneral ? 'true' : 'false');
+  }
+  if (tabAi) {
+    tabAi.classList.toggle('active', isAi);
+    tabAi.setAttribute('aria-selected', isAi ? 'true' : 'false');
+  }
+  if (tabTools) {
+    tabTools.classList.toggle('active', isTools);
+    tabTools.setAttribute('aria-selected', isTools ? 'true' : 'false');
+  }
+  if (tabAbout) {
+    tabAbout.classList.toggle('active', isAbout);
+    tabAbout.setAttribute('aria-selected', isAbout ? 'true' : 'false');
+  }
+  $('settings-pane-general')?.classList.toggle('hidden', !isGeneral);
+  $('settings-pane-ai')?.classList.toggle('hidden', !isAi);
+  $('settings-pane-tools')?.classList.toggle('hidden', !isTools);
+  $('settings-pane-about')?.classList.toggle('hidden', !isAbout);
+}
+
+function renderAboutPane() {
+  const versionEl = $('about-version-text');
+  if (versionEl) {
+    versionEl.textContent = t('aboutVersionLabel', { version: state.appVersion || '0.1.0' });
+  }
+}
+
+function getThemeMode() {
+  const mode = document.documentElement.dataset.themeMode;
+  if (mode === 'system' || mode === 'light' || mode === 'dark') {
+    return mode;
+  }
+  try {
+    const saved = localStorage.getItem('wt-ui-theme');
+    if (saved === 'system' || saved === 'light' || saved === 'dark') {
+      return saved;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+
+function renderGeneralSettingsForm() {
+  const langSelect = $('setting-lang-select');
+  if (langSelect) {
+    langSelect.value = getLang();
+  }
+
+  const currentMode = getThemeMode();
+  document.querySelectorAll('.theme-segment-btn[data-theme-mode]').forEach((btn) => {
+    const isActive = btn.getAttribute('data-theme-mode') === currentMode;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
+
+  const autoStartEl = $('setting-auto-start');
+  if (autoStartEl) {
+    autoStartEl.checked = Boolean(state.generalConfig?.autoStart);
+  }
+
+  const termSelect = $('setting-preferred-terminal');
+  if (termSelect) {
+    termSelect.replaceChildren();
+    for (const term of state.terminals || []) {
+      const opt = document.createElement('option');
+      opt.value = term.id;
+      opt.textContent = term.name;
+      termSelect.appendChild(opt);
+    }
+    const preferred = state.generalConfig?.preferredTerminal;
+    if (preferred && (state.terminals || []).some((item) => item.id === preferred)) {
+      termSelect.value = preferred;
+    } else if (state.terminals?.length > 0) {
+      termSelect.value = state.terminals[0].id;
+    }
+  }
+}
+
+async function saveGeneralConfig(partial) {
+  try {
+    const res = await api('/api/general-config', {
+      method: 'POST',
+      body: JSON.stringify(partial),
+    });
+    state.generalConfig = {
+      autoStart: Boolean(res.generalConfig?.autoStart),
+      preferredTerminal: res.generalConfig?.preferredTerminal || '',
+    };
+    renderGeneralSettingsForm();
+    showToast(t('savedGeneralConfigToast'), 'success');
+  } catch (err) {
+    renderGeneralSettingsForm();
+    showToast(err.message, 'error');
+  }
+}
+
+function renderAiConfigForm() {
+  const urlEl = $('ai-url');
+  const keyEl = $('ai-key');
+  const modelEl = $('ai-model');
+  if (urlEl) urlEl.value = state.aiConfig?.url || '';
+  if (keyEl) keyEl.value = state.aiConfig?.key || '';
+  if (modelEl) modelEl.value = state.aiConfig?.model || '';
+}
+
 function resetToolForm() {
   $('tool-edit-id').value = '';
   $('custom-tool-form').reset();
@@ -1980,7 +2197,7 @@ function startEditTool(tool) {
 
 function renderToolsModalList() {
   const container = $('tools-list');
-  container.innerHTML = '';
+  container.replaceChildren();
   const editingId = $('tool-edit-id').value;
 
   const columns = [
@@ -2003,19 +2220,23 @@ function renderToolsModalList() {
       const row = document.createElement('div');
       row.className = `tool-row${editingId === tool.id ? ' editing' : ''}`;
       row.title = t('clickToEditTool');
-      row.innerHTML = `
-        <div class="tool-row-info">
-          <strong>${escapeHtml(tool.name)}</strong>
-          <div class="mono muted">${escapeHtml(tool.command)} ${escapeHtml((tool.args || []).join(' '))}</div>
-        </div>
-        ${tool.custom ? `<button type="button" class="btn btn-danger-ghost btn-sm">${escapeHtml(t('deleteBtn'))}</button>` : ''}
-      `;
-      row.addEventListener('click', (e) => {
-        if (e.target.closest('button')) return;
-        startEditTool(tool);
-      });
-      const delBtn = row.querySelector('button');
-      if (delBtn) {
+
+      const infoEl = document.createElement('div');
+      infoEl.className = 'tool-row-info';
+      const strongEl = document.createElement('strong');
+      strongEl.textContent = tool.name;
+      const cmdEl = document.createElement('div');
+      cmdEl.className = 'mono muted';
+      cmdEl.textContent = `${tool.command} ${(tool.args || []).join(' ')}`.trim();
+      infoEl.appendChild(strongEl);
+      infoEl.appendChild(cmdEl);
+      row.appendChild(infoEl);
+
+      if (tool.custom) {
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'btn btn-danger-ghost btn-sm';
+        delBtn.textContent = t('deleteBtn');
         delBtn.addEventListener('click', async (e) => {
           e.stopPropagation();
           await api(`/api/tools/${encodeURIComponent(tool.id)}`, { method: 'DELETE' });
@@ -2025,7 +2246,13 @@ function renderToolsModalList() {
           await loadState();
           showToast(t('deletedCustomToolToast'), 'success');
         });
+        row.appendChild(delBtn);
       }
+
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        startEditTool(tool);
+      });
       gridEl.appendChild(row);
     }
     colEl.appendChild(gridEl);
@@ -2049,6 +2276,11 @@ function bindEvents() {
   $('btn-add-target').addEventListener('click', () => {
     openModal('modal-browser');
     browseTo(state.browseCurrentPath);
+  });
+  $('btn-toggle-sidebar')?.addEventListener('click', () => {
+    const layoutEl = $('workspace-layout');
+    const isCollapsed = Boolean(layoutEl?.classList.contains('sidebar-collapsed'));
+    applySidebarCollapsed(!isCollapsed, true);
   });
   $('btn-empty-add').addEventListener('click', () => {
     openModal('modal-browser');
@@ -2164,11 +2396,57 @@ function bindEvents() {
   $('btn-file-accept-theirs').addEventListener('click', () => applyWholeFileStrategy('theirs'));
   $('btn-save-conflict-file').addEventListener('click', saveRawConflictFile);
   $('btn-complete-conflict').addEventListener('click', completeConflictResolution);
+  $('btn-ai-complete-conflict').addEventListener('click', aiCompleteConflictResolution);
   $('btn-abort-conflict').addEventListener('click', abortConflictResolution);
 
   $('btn-manage-tools').addEventListener('click', () => {
     resetToolForm();
+    renderGeneralSettingsForm();
+    renderAiConfigForm();
+    renderAboutPane();
+    setSettingsTab(state.activeSettingsTab || 'general');
     openModal('modal-tools');
+  });
+  $('tab-settings-general')?.addEventListener('click', () => setSettingsTab('general'));
+  $('tab-settings-ai').addEventListener('click', () => setSettingsTab('ai'));
+  $('tab-settings-tools').addEventListener('click', () => setSettingsTab('tools'));
+  $('tab-settings-about')?.addEventListener('click', () => setSettingsTab('about'));
+  $('btn-check-update')?.addEventListener('click', () => {
+    showToast(t('aboutUpdateComingSoonToast'), 'info');
+  });
+
+  $('setting-lang-select')?.addEventListener('change', (e) => {
+    applyLanguage(e.target.value, true);
+  });
+
+  document.querySelectorAll('.theme-segment-btn[data-theme-mode]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const mode = btn.getAttribute('data-theme-mode') || 'dark';
+      applyTheme(mode, true);
+    });
+  });
+
+  $('setting-auto-start')?.addEventListener('change', (e) => {
+    saveGeneralConfig({ autoStart: Boolean(e.target.checked) });
+  });
+
+  $('setting-preferred-terminal')?.addEventListener('change', (e) => {
+    saveGeneralConfig({ preferredTerminal: e.target.value });
+  });
+
+  $('ai-config-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const res = await api('/api/ai-config', {
+      method: 'POST',
+      body: JSON.stringify({
+        url: $('ai-url').value,
+        key: $('ai-key').value,
+        model: $('ai-model').value,
+      }),
+    });
+    state.aiConfig = res.aiConfig || { url: '', key: '', model: '' };
+    renderAiConfigForm();
+    showToast(t('savedAiConfigToast'), 'success');
   });
   $('btn-cancel-tool-edit').addEventListener('click', resetToolForm);
   $('custom-tool-form').addEventListener('submit', async (e) => {
@@ -2212,16 +2490,38 @@ function bindEvents() {
   $('btn-clear-log').addEventListener('click', () => {
     $('command-log').textContent = t('waitingAction');
   });
+}
 
-  $('btn-lang-toggle').addEventListener('click', () => {
-    const next = getLang() === 'zh' ? 'en' : 'zh';
-    applyLanguage(next, true);
-  });
+function applySidebarCollapsed(collapsed, persist = true) {
+  const layoutEl = $('workspace-layout');
+  const toggleBtn = $('btn-toggle-sidebar');
+  const isCollapsed = Boolean(collapsed);
+  if (layoutEl) {
+    layoutEl.classList.toggle('sidebar-collapsed', isCollapsed);
+  }
+  if (toggleBtn) {
+    const label = t(isCollapsed ? 'expandSidebarTitle' : 'collapseSidebarTitle');
+    toggleBtn.title = label;
+    toggleBtn.setAttribute('aria-label', label);
+    toggleBtn.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+  }
+  if (persist) {
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, isCollapsed ? '1' : '0');
+    } catch {
+      // ignore storage errors
+    }
+  }
+}
 
-  $('btn-theme-toggle').addEventListener('click', () => {
-    const current = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-    applyTheme(current === 'light' ? 'dark' : 'light', true);
-  });
+function initSidebarCollapsed() {
+  let collapsed = false;
+  try {
+    collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+  } catch {
+    collapsed = false;
+  }
+  applySidebarCollapsed(collapsed, false);
 }
 
 function applyLanguage(lang, persist = true) {
@@ -2230,8 +2530,11 @@ function applyLanguage(lang, persist = true) {
   if (logEl && (logEl.textContent === MESSAGES.zh.waitingAction || logEl.textContent === MESSAGES.en.waitingAction)) {
     logEl.textContent = t('waitingAction');
   }
-  const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-  applyTheme(theme, false);
+  applyTheme(getThemeMode(), false);
+  const layoutEl = $('workspace-layout');
+  applySidebarCollapsed(Boolean(layoutEl?.classList.contains('sidebar-collapsed')), false);
+  renderGeneralSettingsForm();
+  renderAboutPane();
   if (state.env) renderEnv(false);
   renderSidebar();
   renderMainProject();
@@ -2248,27 +2551,40 @@ function applyLanguage(lang, persist = true) {
   renderToolsModalList();
 }
 
-function applyTheme(theme, persist = true) {
-  const next = theme === 'light' ? 'light' : 'dark';
-  document.documentElement.dataset.theme = next;
+function applyTheme(mode, persist = true) {
+  const nextMode = mode === 'system' || mode === 'light' || mode === 'dark' ? mode : 'dark';
+  const sysLight =
+    typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: light)').matches;
+  const resolved = nextMode === 'system' ? (sysLight ? 'light' : 'dark') : nextMode;
+  document.documentElement.dataset.themeMode = nextMode;
+  document.documentElement.dataset.theme = resolved;
   if (persist) {
     try {
-      localStorage.setItem('wt-ui-theme', next);
+      localStorage.setItem('wt-ui-theme', nextMode);
     } catch {
       // ignore storage errors
     }
   }
-  const btn = $('btn-theme-toggle');
-  if (btn) {
-    const label = next === 'light' ? t('themeLightTitle') : t('themeDarkTitle');
-    btn.title = label;
-    btn.setAttribute('aria-label', label);
-  }
+  document.querySelectorAll('.theme-segment-btn[data-theme-mode]').forEach((btn) => {
+    const isActive = btn.getAttribute('data-theme-mode') === nextMode;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
 }
 
 function initTheme() {
-  const current = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-  applyTheme(current, false);
+  applyTheme(getThemeMode(), false);
+  if (typeof window.matchMedia === 'function') {
+    const mq = window.matchMedia('(prefers-color-scheme: light)');
+    const onSystemThemeChange = () => {
+      if (getThemeMode() === 'system') {
+        applyTheme('system', false);
+      }
+    };
+    if (typeof mq.addEventListener === 'function') {
+      mq.addEventListener('change', onSystemThemeChange);
+    }
+  }
 }
 
 async function init() {
@@ -2278,6 +2594,7 @@ async function init() {
     logEl.textContent = t('waitingAction');
   }
   initTheme();
+  initSidebarCollapsed();
   bindEvents();
   await Promise.all([loadHealth(true), loadState()]);
   await refreshWorktrees();

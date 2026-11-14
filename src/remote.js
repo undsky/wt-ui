@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { formatCommand } from './wt-resolver.js';
 import { getConflictStatus } from './conflict.js';
+import { samePath } from './store.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -503,7 +504,7 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
 export async function pullWorktreeBranch(repoPath, options = {}) {
   const worktrees = await listGitWorktrees(repoPath);
   const targetWt =
-    (options.workDir && worktrees.find((w) => w.path === resolve(options.workDir))) ||
+    (options.workDir && worktrees.find((w) => samePath(w.path, resolve(options.workDir)))) ||
     (options.branch && worktrees.find((w) => w.branch === options.branch)) ||
     worktrees.find((w) => w.isMain) ||
     { path: repoPath, branch: options.branch || '' };
@@ -578,9 +579,8 @@ export async function pullWorktreeBranch(repoPath, options = {}) {
  */
 export async function pushWorktreeBranch(repoPath, options = {}) {
   const worktrees = await listGitWorktrees(repoPath);
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
   const targetWt =
-    (options.workDir && worktrees.find((w) => norm(w.path) === norm(resolve(options.workDir)))) ||
+    (options.workDir && worktrees.find((w) => samePath(w.path, resolve(options.workDir)))) ||
     (options.branch && worktrees.find((w) => w.branch === options.branch)) ||
     worktrees.find((w) => w.isMain) ||
     { path: repoPath, branch: options.branch || '' };

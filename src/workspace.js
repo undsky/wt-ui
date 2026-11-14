@@ -203,27 +203,41 @@ export function browsePath(targetPath) {
   const parent = dirname(abs);
   const parentPath = parent === abs ? (process.platform === 'win32' ? '' : null) : parent;
 
-  const dirents = readdirSync(abs, { withFileTypes: true });
+  let dirents = [];
+  try {
+    dirents = readdirSync(abs, { withFileTypes: true });
+  } catch (err) {
+    throw new Error(`无法读取目录 (${abs}): ${err.message}`);
+  }
   const entries = [];
 
   for (const dirent of dirents) {
     if (dirent.name.startsWith('$') || dirent.name === 'System Volume Information') continue;
     const fullPath = resolve(abs, dirent.name);
-    if (dirent.isDirectory()) {
-      const isGitRepo = existsSync(resolve(fullPath, '.git'));
-      entries.push({
-        name: dirent.name,
-        path: fullPath,
-        type: 'directory',
-        isGitRepo,
-      });
-    } else if (dirent.isFile() && dirent.name.toLowerCase().endsWith('.code-workspace')) {
-      entries.push({
-        name: dirent.name,
-        path: fullPath,
-        type: 'workspace',
-        isGitRepo: false,
-      });
+    try {
+      if (dirent.isDirectory()) {
+        let isGitRepo = false;
+        try {
+          isGitRepo = existsSync(resolve(fullPath, '.git'));
+        } catch {
+          isGitRepo = false;
+        }
+        entries.push({
+          name: dirent.name,
+          path: fullPath,
+          type: 'directory',
+          isGitRepo,
+        });
+      } else if (dirent.isFile() && dirent.name.toLowerCase().endsWith('.code-workspace')) {
+        entries.push({
+          name: dirent.name,
+          path: fullPath,
+          type: 'workspace',
+          isGitRepo: false,
+        });
+      }
+    } catch {
+      // Skip unreadable system entries (common on Windows root drives)
     }
   }
 

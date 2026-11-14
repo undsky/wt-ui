@@ -19,6 +19,7 @@ import {
 } from './remote.js';
 import {
   abortConflictMerge,
+  aiResolveAndCompleteConflictMerge,
   completeConflictMerge,
   getConflictStatus,
   readConflictFileDetails,
@@ -30,12 +31,22 @@ import {
   loadStore,
   removeProject,
   removeWorkspace,
+  samePath,
   saveStore,
+  setAutoStartEnabled,
 } from './store.js';
-import { BUILTIN_TOOLS, findToolById, getAllTools, switchAndOpenWorktree } from './tools.js';
+import {
+  BUILTIN_TOOLS,
+  findToolById,
+  getAllTools,
+  getSupportedTerminals,
+  switchAndOpenWorktree,
+} from './tools.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, '..', 'public');
+const PKG = JSON.parse(readFileSync(resolve(__dirname, '..', 'package.json'), 'utf8'));
+const APP_VERSION = PKG.version || '0.1.0';
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -188,7 +199,9 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         const store = loadStore();
         sendJson(res, 200, {
           ...store,
+          appVersion: APP_VERSION,
           tools: getAllTools(store.customTools),
+          terminals: getSupportedTerminals(),
         });
         return;
       }
@@ -305,6 +318,46 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         return;
       }
 
+      if (req.method === 'POST' && pathname === '/api/general-config') {
+        const body = await readJsonBody(req);
+        const store = loadStore();
+        const prevAutoStart = Boolean(store.generalConfig?.autoStart);
+        const nextAutoStart =
+          typeof body.autoStart === 'boolean' ? body.autoStart : prevAutoStart;
+        const nextTerminal =
+          typeof body.preferredTerminal === 'string' && body.preferredTerminal.trim()
+            ? body.preferredTerminal.trim()
+            : store.generalConfig?.preferredTerminal || '';
+
+        if (typeof body.autoStart === 'boolean') {
+          setAutoStartEnabled(nextAutoStart);
+        }
+
+        store.generalConfig = {
+          autoStart: nextAutoStart,
+          preferredTerminal: nextTerminal,
+        };
+        saveStore(store);
+        sendJson(res, 200, {
+          generalConfig: store.generalConfig,
+          terminals: getSupportedTerminals(),
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/ai-config') {
+        const body = await readJsonBody(req);
+        const store = loadStore();
+        store.aiConfig = {
+          url: typeof body.url === 'string' ? body.url.trim() : '',
+          key: typeof body.key === 'string' ? body.key.trim() : '',
+          model: typeof body.model === 'string' ? body.model.trim() : '',
+        };
+        saveStore(store);
+        sendJson(res, 200, { aiConfig: store.aiConfig });
+        return;
+      }
+
       if (req.method === 'POST' && pathname === '/api/tools') {
         const body = await readJsonBody(req);
         if (!body.name || !body.command) {
@@ -412,6 +465,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           base: body.base ? String(body.base).trim() : '',
           tool,
           prompt: body.prompt ? String(body.prompt).trim() : '',
+          preferredTerminal: store.generalConfig?.preferredTerminal || '',
         });
 
         if (result.ok && tool?.id) {
@@ -731,6 +785,38 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         return;
       }
 
+      if (req.method === 'POST' && pathname === '/api/conflicts/ai-complete') {
+        const body = await readJsonBody(req);
+        const store = loadStore();
+        const project = store.projects.find((p) => p.id === (body.projectId || store.activeProjectId));
+        if (!project) {
+          sendJson(res, 404, { error: '项目不存在' });
+          return;
+        }
+        const workDir = await resolveProjectWorkDir(project, body.workDir);
+        const trackedFiles = Array.isArray(body.trackedFiles) ? body.trackedFiles : [];
+        try {
+          const result = await aiResolveAndCompleteConflictMerge(workDir, {
+            sourceBranch: body.sourceBranch,
+            targetBranch: body.targetBranch,
+            isRemote: Boolean(body.isRemote),
+            autoPush: body.autoPush !== false,
+            deleteRemote: Boolean(body.deleteRemote),
+            trackedFiles,
+            aiConfig: store.aiConfig,
+          });
+          sendJson(res, result.ok ? 200 : 422, result);
+        } catch (err) {
+          const status = await getConflictStatus(workDir, trackedFiles).catch(() => null);
+          sendJson(res, 422, {
+            ok: false,
+            error: err?.message || String(err),
+            status,
+          });
+        }
+        return;
+      }
+
       if (req.method === 'POST' && pathname === '/api/conflicts/abort') {
         const body = await readJsonBody(req);
         const store = loadStore();
@@ -758,11 +844,10 @@ async function resolveProjectWorkDir(project, requestedWorkDir) {
   const projRoot = resolve(project.path);
   if (!requestedWorkDir) return projRoot;
   const candidate = resolve(requestedWorkDir);
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  if (norm(candidate) === norm(projRoot)) return candidate;
+  if (samePath(candidate, projRoot)) return candidate;
 
   const worktrees = await listGitWorktrees(projRoot);
-  const matched = worktrees.find((wt) => norm(resolve(wt.path)) === norm(candidate));
+  const matched = worktrees.find((wt) => samePath(resolve(wt.path), candidate));
   if (matched) return resolve(matched.path);
 
   throw new HttpError(403, `目标工作树目录不属于当前项目: ${requestedWorkDir}`);
