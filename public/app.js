@@ -12,6 +12,7 @@ const state = {
   terminals: [],
   generalConfig: { autoStart: false, preferredTerminal: '' },
   aiConfig: { url: '', key: '', model: '' },
+  aiModels: [],
   activeSettingsTab: 'general',
   openTabIds: [],
   worktreeCache: {},
@@ -87,6 +88,56 @@ function openModal(id) {
 
 function closeModal(id) {
   $(id).classList.add('hidden');
+}
+
+let confirmResolver = null;
+let confirmKeydownHandler = null;
+
+function settleConfirm(result) {
+  const modal = $('modal-confirm');
+  if (modal) modal.classList.add('hidden');
+  if (confirmKeydownHandler) {
+    document.removeEventListener('keydown', confirmKeydownHandler, true);
+    confirmKeydownHandler = null;
+  }
+  const resolver = confirmResolver;
+  confirmResolver = null;
+  if (resolver) resolver(Boolean(result));
+}
+
+function showConfirm({ title = '', message = '', confirmText = '', cancelText = '', danger = false } = {}) {
+  if (confirmResolver) {
+    settleConfirm(false);
+  }
+  const titleEl = $('modal-confirm-title');
+  const msgEl = $('modal-confirm-message');
+  const okBtn = $('btn-confirm-ok');
+  const cancelBtn = $('btn-confirm-cancel');
+  if (!titleEl || !msgEl || !okBtn || !cancelBtn) {
+    return Promise.resolve(false);
+  }
+
+  titleEl.textContent = title || t('confirmModalTitle');
+  msgEl.textContent = message;
+  okBtn.textContent = confirmText || t('confirmBtn');
+  cancelBtn.textContent = cancelText || t('cancelBtn');
+  okBtn.classList.toggle('btn-danger', Boolean(danger));
+  okBtn.classList.toggle('btn-primary', !danger);
+
+  openModal('modal-confirm');
+  (danger ? cancelBtn : okBtn).focus();
+
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+    confirmKeydownHandler = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        settleConfirm(false);
+      }
+    };
+    document.addEventListener('keydown', confirmKeydownHandler, true);
+  });
 }
 
 function getActiveProject() {
@@ -649,7 +700,7 @@ function renderWorktrees() {
         <div class="actions-cell">
           ${
             wt?.changes?.conflicted && wt?.path
-              ? `<button class="btn btn-primary btn-sm btn-resolve-conflict">${escapeHtml(t('resolveConflictBtn'))}</button>`
+              ? `<button class="btn btn-warning btn-sm btn-resolve-conflict">${escapeHtml(t('resolveConflictBtn'))}</button>`
               : ''
           }
           ${
@@ -995,7 +1046,12 @@ async function switchWorktreeWithClobberPrompt(payload) {
     const stderr = err.payload?.stderr || err.message || '';
     if (!payload.clobber && /directory already exists|--clobber/i.test(stderr)) {
       appendLog(t('logFail', { target: err.payload?.command || payload.branch }), stderr);
-      if (window.confirm(t('clobberConfirm', { stderr }))) {
+      const confirmed = await showConfirm({
+        title: t('clobberConfirmTitle'),
+        message: t('clobberConfirm', { stderr }),
+        danger: true,
+      });
+      if (confirmed) {
         return api('/api/worktrees/switch', {
           method: 'POST',
           body: JSON.stringify({ ...payload, clobber: true }),
@@ -2424,7 +2480,12 @@ async function abortConflictResolution() {
   const active = getActiveProject();
   const cs = state.conflictSession;
   if (!active || !cs) return;
-  if (!window.confirm(t('abortMergeConfirm'))) return;
+  const confirmed = await showConfirm({
+    title: t('abortMergeConfirmTitle'),
+    message: t('abortMergeConfirm'),
+    danger: true,
+  });
+  if (!confirmed) return;
 
   try {
     const res = await api('/api/conflicts/abort', {
@@ -2447,7 +2508,12 @@ async function abortConflictResolution() {
 async function deleteRemoteBranchRow(fullRef) {
   const active = getActiveProject();
   if (!active) return;
-  if (!window.confirm(t('deleteRemoteBranchConfirm', { branch: fullRef }))) return;
+  const confirmed = await showConfirm({
+    title: t('deleteRemoteBranchConfirmTitle'),
+    message: t('deleteRemoteBranchConfirm', { branch: fullRef }),
+    danger: true,
+  });
+  if (!confirmed) return;
   try {
     const res = await api('/api/remote/delete', {
       method: 'POST',
@@ -2466,6 +2532,12 @@ async function deleteRemoteBranchRow(fullRef) {
 async function removeWorktreeRow(branch) {
   const active = getActiveProject();
   if (!active) return;
+  const confirmed = await showConfirm({
+    title: t('removeWorktreeConfirmTitle'),
+    message: t('removeWorktreeConfirm', { branch }),
+    danger: true,
+  });
+  if (!confirmed) return;
   try {
     const res = await api('/api/worktrees/remove', {
       method: 'POST',
@@ -2483,7 +2555,11 @@ async function removeWorktreeRow(branch) {
   } catch (err) {
     const stderr = err.payload?.stderr || err.message;
     appendLog(t('removeFailLog', { cmd: err.payload?.command || '' }), stderr);
-    const force = window.confirm(t('forceRemoveConfirm', { stderr }));
+    const force = await showConfirm({
+      title: t('forceRemoveConfirmTitle'),
+      message: t('forceRemoveConfirm', { stderr }),
+      danger: true,
+    });
     if (!force) return;
     try {
       const res2 = await api('/api/worktrees/remove', {
@@ -2693,13 +2769,79 @@ async function saveGeneralConfig(partial) {
   }
 }
 
+function renderAiModelSelect(preferredModel = '') {
+  const modelEl = $('ai-model');
+  if (!modelEl) return;
+
+  const targetModel = String(preferredModel ?? '').trim();
+  const options = [...(Array.isArray(state.aiModels) ? state.aiModels : [])];
+  if (targetModel && !options.includes(targetModel)) {
+    options.unshift(targetModel);
+  }
+
+  modelEl.innerHTML = '';
+  if (options.length === 0) {
+    const placeholderOpt = document.createElement('option');
+    placeholderOpt.value = '';
+    placeholderOpt.textContent = t('aiModelSelectPlaceholder');
+    modelEl.appendChild(placeholderOpt);
+    modelEl.value = '';
+    return;
+  }
+
+  for (const id of options) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id;
+    modelEl.appendChild(opt);
+  }
+  modelEl.value = targetModel && options.includes(targetModel) ? targetModel : options[0];
+}
+
 function renderAiConfigForm() {
   const urlEl = $('ai-url');
   const keyEl = $('ai-key');
-  const modelEl = $('ai-model');
   if (urlEl) urlEl.value = state.aiConfig?.url || '';
   if (keyEl) keyEl.value = state.aiConfig?.key || '';
-  if (modelEl) modelEl.value = state.aiConfig?.model || '';
+  renderAiModelSelect(state.aiConfig?.model || '');
+}
+
+async function fetchAiModelsList() {
+  const urlEl = $('ai-url');
+  const keyEl = $('ai-key');
+  const btnEl = $('btn-fetch-ai-models');
+  const url = (urlEl?.value || '').trim();
+  const key = (keyEl?.value || '').trim();
+
+  if (!url) {
+    showToast(t('aiUrlMissingWarn'), 'error');
+    urlEl?.focus();
+    return;
+  }
+
+  const prevSelected = ($('ai-model')?.value || state.aiConfig?.model || '').trim();
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = t('fetchingAiModelsBtn');
+  }
+  try {
+    const res = await api('/api/ai-models', {
+      method: 'POST',
+      body: JSON.stringify({ url, key }),
+    });
+    const models = Array.isArray(res.models) ? res.models : [];
+    state.aiModels = models;
+    const nextModel = prevSelected && models.includes(prevSelected) ? prevSelected : models[0] || '';
+    renderAiModelSelect(nextModel);
+    showToast(t('fetchedAiModelsToast', { count: models.length }), 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = t('fetchAiModelsBtn');
+    }
+  }
 }
 
 function resetToolForm() {
@@ -2798,6 +2940,11 @@ function bindEvents() {
   document.querySelectorAll('[data-close]').forEach((el) => {
     el.addEventListener('click', () => closeModal(el.getAttribute('data-close')));
   });
+
+  $('modal-confirm-backdrop')?.addEventListener('click', () => settleConfirm(false));
+  $('btn-confirm-close')?.addEventListener('click', () => settleConfirm(false));
+  $('btn-confirm-cancel')?.addEventListener('click', () => settleConfirm(false));
+  $('btn-confirm-ok')?.addEventListener('click', () => settleConfirm(true));
 
   $('btn-add-target').addEventListener('click', () => {
     openModal('modal-browser');
@@ -2960,6 +3107,8 @@ function bindEvents() {
     saveGeneralConfig({ preferredTerminal: e.target.value });
   });
 
+  $('btn-fetch-ai-models')?.addEventListener('click', fetchAiModelsList);
+
   $('ai-config-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const res = await api('/api/ai-config', {
@@ -3013,6 +3162,40 @@ function bindEvents() {
   $('btn-modal-recheck').addEventListener('click', recheckEnv);
   $('btn-auto-install-wt').addEventListener('click', triggerAutoInstallWt);
 
+  $('btn-copy-log')?.addEventListener('click', async () => {
+    const text = $('command-log')?.textContent || '';
+    const isInitial = !text.trim() || text === MESSAGES.zh.waitingAction || text === MESSAGES.en.waitingAction;
+    if (isInitial) {
+      showToast(t('copyLogEmptyToast'), 'info');
+      return;
+    }
+    try {
+      let copied = false;
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(text);
+          copied = true;
+        } catch {
+          copied = false;
+        }
+      }
+      if (!copied) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        copied = document.execCommand('copy');
+        ta.remove();
+      }
+      if (!copied) throw new Error('copy failed');
+      showToast(t('copiedToClipboard'), 'success');
+    } catch {
+      showToast(t('copyLogFailToast'), 'error');
+    }
+  });
+
   $('btn-clear-log').addEventListener('click', () => {
     $('command-log').textContent = t('waitingAction');
   });
@@ -3060,6 +3243,7 @@ function applyLanguage(lang, persist = true) {
   const layoutEl = $('workspace-layout');
   applySidebarCollapsed(Boolean(layoutEl?.classList.contains('sidebar-collapsed')), false);
   renderGeneralSettingsForm();
+  renderAiModelSelect($('ai-model')?.value || state.aiConfig?.model || '');
   renderAboutPane();
   if (state.env) renderEnv(false);
   renderSidebar();

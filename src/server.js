@@ -21,6 +21,7 @@ import {
   abortConflictMerge,
   aiResolveAndCompleteConflictMerge,
   completeConflictMerge,
+  fetchAiModels,
   getConflictStatus,
   readConflictFileDetails,
   resolveConflictFile,
@@ -370,6 +371,20 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         };
         saveStore(store);
         sendJson(res, 200, { aiConfig: store.aiConfig });
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/ai-models') {
+        const body = await readJsonBody(req);
+        const store = loadStore();
+        const url = typeof body.url === 'string' ? body.url.trim() : store.aiConfig?.url || '';
+        const key = typeof body.key === 'string' ? body.key.trim() : store.aiConfig?.key || '';
+        try {
+          const models = await fetchAiModels({ url, key });
+          sendJson(res, 200, { models });
+        } catch (err) {
+          sendJson(res, 400, { error: err?.message || String(err) });
+        }
         return;
       }
 

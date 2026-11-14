@@ -638,6 +638,16 @@ code, .mono {
   letter-spacing: -0.01em;
 }
 
+.card-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.card-header-actions .btn-sm {
+  padding: 4px 6px;
+}
+
 .project-header {
   display: flex;
   align-items: center;
@@ -820,6 +830,17 @@ input[type="checkbox"] {
   color: #ffffff;
 }
 
+.btn-warning {
+  background: #e67e00;
+  color: #ffffff;
+  box-shadow: 0 1px 2px rgba(217, 119, 6, 0.25);
+}
+
+.btn-warning:hover:not(:disabled) {
+  background: #c96a00;
+  color: #ffffff;
+}
+
 .btn-secondary {
   background: var(--surface-2);
   border-color: var(--border);
@@ -839,6 +860,17 @@ input[type="checkbox"] {
 
 .btn-danger-ghost:hover:not(:disabled) {
   background: var(--danger-soft);
+}
+
+.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #ffffff;
+  box-shadow: 0 1px 2px rgba(220, 38, 38, 0.25);
+}
+
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(0.92);
 }
 
 .btn-ghost {
@@ -1091,6 +1123,25 @@ input[type="checkbox"] {
 
 .modal-lg {
   width: min(760px, 94vw);
+}
+
+.modal-sm {
+  width: min(440px, 92vw);
+}
+
+.modal-confirm {
+  z-index: 80;
+}
+
+.confirm-message {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 50vh;
+  overflow-y: auto;
 }
 
 .modal-xl {
@@ -1769,6 +1820,8 @@ input[type="checkbox"] {
 .ai-form-actions {
   display: flex;
   justify-content: flex-start;
+  align-items: center;
+  gap: 10px;
   padding-top: 4px;
 }
 

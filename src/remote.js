@@ -496,6 +496,28 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
 }
 
 /**
+ * Return `--no-rebase` when Git has no pull reconciliation preference configured,
+ * avoiding `fatal: Need to specify how to reconcile divergent branches.` on diverged branches.
+ * @param {string} workDir
+ * @param {string} currentBranch
+ */
+async function getPullReconcileFlag(workDir, currentBranch) {
+  const checks = [
+    currentBranch ? ['config', '--get', `branch.${currentBranch}.rebase`] : null,
+    ['config', '--get', 'pull.rebase'],
+    ['config', '--get', 'pull.ff'],
+  ].filter(Boolean);
+
+  for (const args of checks) {
+    const res = await runGit(workDir, args, { timeout: 5_000 });
+    if (res.ok && res.stdout.trim()) {
+      return [];
+    }
+  }
+  return ['--no-rebase'];
+}
+
+/**
  * Pull remote updates into a local worktree using `git pull --autostash`,
  * and detect any resulting merge or autostash conflicts.
  * @param {string} repoPath
@@ -516,18 +538,35 @@ export async function pullWorktreeBranch(repoPath, options = {}) {
     currentBranch = revRes.stdout.trim();
   }
 
+  // Guard against pulling while a rebase or merge is already in progress (which detaches HEAD).
+  const [rebaseHeadRes, mergeHeadRes] = await Promise.all([
+    runGit(workDir, ['rev-parse', '-q', '--verify', 'REBASE_HEAD'], { timeout: 5_000 }),
+    runGit(workDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { timeout: 5_000 }),
+  ]);
+  if (rebaseHeadRes.ok || mergeHeadRes.ok) {
+    const opName = rebaseHeadRes.ok ? '变基 (rebase)' : '合并 (merge)';
+    const hintCmd = rebaseHeadRes.ok ? 'git rebase --continue / --abort' : 'git commit / git merge --abort';
+    return {
+      ok: false,
+      hasConflicts: false,
+      command: formatCommand('git', ['-C', workDir, 'status']),
+      stdout: '',
+      stderr: `当前工作树存在未完成的${opName}操作，无法直接拉取。请先完成或放弃当前操作 (${hintCmd})。`,
+      conflictSession: null,
+    };
+  }
+
   // Check if an upstream tracking branch is configured
-  const upstreamRes = await runGit(
-    workDir,
-    ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'],
-    { timeout: 5_000 }
-  );
+  const [upstreamRes, reconcileFlag] = await Promise.all([
+    runGit(workDir, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], { timeout: 5_000 }),
+    getPullReconcileFlag(workDir, currentBranch),
+  ]);
 
   let pullArgs;
   let sourceBranchLabel = '';
   if (upstreamRes.ok && upstreamRes.stdout.trim()) {
     sourceBranchLabel = upstreamRes.stdout.trim();
-    pullArgs = ['pull', '--autostash'];
+    pullArgs = ['pull', ...reconcileFlag, '--autostash'];
   } else {
     const remoteRes = await runGit(workDir, ['remote'], { timeout: 5_000 });
     const firstRemote =
@@ -536,7 +575,9 @@ export async function pullWorktreeBranch(repoPath, options = {}) {
         .map((s) => s.trim())
         .find(Boolean) || 'origin';
     sourceBranchLabel = currentBranch ? `${firstRemote}/${currentBranch}` : firstRemote;
-    pullArgs = currentBranch ? ['pull', '--autostash', firstRemote, currentBranch] : ['pull', '--autostash'];
+    pullArgs = currentBranch
+      ? ['pull', ...reconcileFlag, '--autostash', firstRemote, currentBranch]
+      : ['pull', ...reconcileFlag, '--autostash'];
   }
 
   const pullRes = await runGit(workDir, pullArgs, { timeout: 60_000 });

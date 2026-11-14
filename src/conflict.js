@@ -429,11 +429,11 @@ function buildStepsResult(ok, steps, extra = {}) {
 }
 
 /**
- * Normalize a user-configured AI base URL or full endpoint URL.
+ * Parse and validate an AI base/endpoint URL.
  * @param {string} rawUrl
- * @returns {{ endpoint: string, isAnthropic: boolean }}
+ * @returns {{ trimmed: string, parsed: URL, pathname: string }}
  */
-export function buildAiChatEndpoint(rawUrl) {
+function parseAiBaseUrl(rawUrl) {
   const trimmed = String(rawUrl || '').trim().replace(/\/+$/, '');
   if (!trimmed) {
     throw new Error('未配置 AI URL');
@@ -447,8 +447,17 @@ export function buildAiChatEndpoint(rawUrl) {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`不支持的 AI URL 协议: ${parsed.protocol}`);
   }
-
   const pathname = parsed.pathname.replace(/\/+$/, '');
+  return { trimmed, parsed, pathname };
+}
+
+/**
+ * Normalize a user-configured AI base URL or full endpoint URL.
+ * @param {string} rawUrl
+ * @returns {{ endpoint: string, isAnthropic: boolean }}
+ */
+export function buildAiChatEndpoint(rawUrl) {
+  const { trimmed, pathname } = parseAiBaseUrl(rawUrl);
   if (pathname.endsWith('/messages')) {
     return { endpoint: trimmed, isAnthropic: true };
   }
@@ -459,6 +468,111 @@ export function buildAiChatEndpoint(rawUrl) {
     return { endpoint: `${trimmed}/chat/completions`, isAnthropic: false };
   }
   return { endpoint: `${trimmed}/v1/chat/completions`, isAnthropic: false };
+}
+
+/**
+ * Derive the models listing endpoint from a user-configured AI base/endpoint URL.
+ * @param {string} rawUrl
+ * @returns {{ endpoint: string, isAnthropic: boolean }}
+ */
+export function buildAiModelsEndpoint(rawUrl) {
+  const { trimmed, parsed, pathname } = parseAiBaseUrl(rawUrl);
+  const isAnthropicHost = /(?:^|\.)anthropic\.com$/i.test(parsed.hostname);
+  if (pathname.endsWith('/models')) {
+    return { endpoint: trimmed, isAnthropic: isAnthropicHost };
+  }
+  if (pathname.endsWith('/messages')) {
+    return { endpoint: `${trimmed.slice(0, -'/messages'.length)}/models`, isAnthropic: true };
+  }
+  if (pathname.endsWith('/chat/completions')) {
+    return { endpoint: `${trimmed.slice(0, -'/chat/completions'.length)}/models`, isAnthropic: isAnthropicHost };
+  }
+  if (/\/v\d+(?:beta)?(?:\/openai)?$/i.test(pathname)) {
+    return { endpoint: `${trimmed}/models`, isAnthropic: isAnthropicHost };
+  }
+  return { endpoint: `${trimmed}/v1/models`, isAnthropic: isAnthropicHost };
+}
+
+/**
+ * Fetch available model IDs from the configured OpenAI- or Anthropic-compatible `/models` endpoint.
+ * @param {{ url: string, key?: string }} options
+ * @returns {Promise<string[]>}
+ */
+export async function fetchAiModels(options = {}) {
+  const url = String(options.url || '').trim();
+  const key = String(options.key || '').trim();
+  if (!url) {
+    throw new Error('请先填写 AI URL');
+  }
+
+  const { endpoint, isAnthropic } = buildAiModelsEndpoint(url);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('获取模型列表超时 (30s)')), 30_000);
+
+  let res;
+  try {
+    const headers = {};
+    if (key) {
+      headers.Authorization = `Bearer ${key}`;
+      if (isAnthropic) {
+        headers['x-api-key'] = key;
+        headers['anthropic-version'] = '2023-06-01';
+      }
+    }
+    res = await fetch(endpoint, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    throw new Error(`获取模型列表失败: ${err?.message || String(err)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const rawBody = await res.text();
+  let data = null;
+  try {
+    data = JSON.parse(rawBody);
+  } catch {
+    // handled below
+  }
+
+  if (!res.ok) {
+    const apiErr =
+      data?.error?.message ||
+      data?.message ||
+      (typeof data?.error === 'string' ? data.error : '') ||
+      rawBody.slice(0, 240) ||
+      `HTTP ${res.status}`;
+    throw new Error(`获取模型列表失败 (${res.status}): ${apiErr}`);
+  }
+
+  const rawList = Array.isArray(data?.data)
+    ? data.data
+    : Array.isArray(data?.models)
+      ? data.models
+      : Array.isArray(data)
+        ? data
+        : [];
+
+  const seen = new Set();
+  const models = [];
+  for (const item of rawList) {
+    const id = String(
+      typeof item === 'string' ? item : item?.id || item?.name || item?.model || ''
+    ).trim();
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      models.push(id);
+    }
+  }
+
+  if (models.length === 0) {
+    throw new Error('接口未返回任何可用模型');
+  }
+
+  return models;
 }
 
 /**

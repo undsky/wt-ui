@@ -168,15 +168,6 @@ export const BUILTIN_TOOLS = [
     supportsPrompt: false,
     description: '使用 Kiro IDE 打开工作树',
   },
-  {
-    id: 'zed',
-    name: 'Zed',
-    kind: 'gui',
-    command: 'zed',
-    args: ['.'],
-    supportsPrompt: false,
-    description: '使用 Zed 编辑器打开工作树',
-  },
 ];
 
 export function getAllTools(customTools = []) {

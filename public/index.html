@@ -130,7 +130,10 @@
               <section class="log-card card">
                 <div class="card-header">
                   <h3 data-i18n="commandLogTitle">命令执行日志</h3>
-                  <button id="btn-clear-log" class="btn btn-ghost btn-sm" data-i18n="clearBtn">清空</button>
+                  <div class="card-header-actions">
+                    <button type="button" id="btn-copy-log" class="btn btn-ghost btn-sm" data-i18n="copyBtn">复制</button>
+                    <button type="button" id="btn-clear-log" class="btn btn-ghost btn-sm" data-i18n="clearBtn">清空</button>
+                  </div>
                 </div>
                 <pre id="command-log" class="command-log">等待操作...</pre>
               </section>
@@ -428,15 +431,12 @@
                 </div>
                 <div class="field">
                   <label for="ai-model" data-i18n="aiModelLabel">Model</label>
-                  <input
-                    id="ai-model"
-                    type="text"
-                    autocomplete="off"
-                    data-i18n-placeholder="aiModelPlaceholder"
-                    placeholder="gpt-4o / claude-3-5-sonnet"
-                  />
+                  <select id="ai-model">
+                    <option value="" data-i18n="aiModelSelectPlaceholder">请先点击「获取模型」</option>
+                  </select>
                 </div>
                 <div class="ai-form-actions">
+                  <button type="button" id="btn-fetch-ai-models" class="btn btn-secondary" data-i18n="fetchAiModelsBtn">获取模型</button>
                   <button type="submit" id="btn-ai-submit" class="btn btn-primary" data-i18n="saveAiConfigBtn">保存配置</button>
                 </div>
               </form>
@@ -477,7 +477,6 @@
             </div>
             <div id="settings-pane-about" class="settings-pane hidden" role="tabpanel">
               <div class="settings-section">
-                <h4 class="settings-section-title" data-i18n="settingsTabAbout">关于</h4>
                 <div class="settings-group-card about-card">
                   <div class="settings-row about-header-row">
                     <div class="about-app-info">
@@ -520,6 +519,31 @@
           <button id="btn-auto-install-wt" class="btn btn-success" data-i18n="autoInstallBtn">国内源自动安装</button>
           <button id="btn-modal-recheck" class="btn btn-primary" data-i18n="recheckEnvModalBtn">重新检测环境</button>
           <button class="btn btn-ghost" data-close="modal-install" data-i18n="closeBtn">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Confirm Dialog -->
+    <div
+      id="modal-confirm"
+      class="modal modal-confirm hidden"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="modal-confirm-title"
+      aria-describedby="modal-confirm-message"
+    >
+      <div id="modal-confirm-backdrop" class="modal-backdrop"></div>
+      <div class="modal-dialog modal-sm">
+        <div class="modal-header">
+          <h3 id="modal-confirm-title" data-i18n="confirmModalTitle">确认操作</h3>
+          <button type="button" id="btn-confirm-close" class="btn-icon" data-i18n-aria="closeBtn" aria-label="关闭">✕</button>
+        </div>
+        <div class="modal-body">
+          <p id="modal-confirm-message" class="confirm-message"></p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="btn-confirm-cancel" class="btn btn-ghost" data-i18n="cancelBtn">取消</button>
+          <button type="button" id="btn-confirm-ok" class="btn btn-primary" data-i18n="confirmBtn">确认</button>
         </div>
       </div>
     </div>
