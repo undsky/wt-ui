@@ -30,6 +30,7 @@
         }
       })();
     </script>
+    <link rel="stylesheet" href="/vendor/monaco/vs/editor/editor.main.css" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -274,7 +275,15 @@
             </div>
             <div id="conflict-visual-pane" class="conflict-visual-pane"></div>
             <div id="conflict-raw-pane" class="conflict-raw-pane hidden">
-              <textarea id="conflict-raw-textarea" class="conflict-raw-textarea" spellcheck="false"></textarea>
+              <div class="conflict-editor-statusbar">
+                <div class="conflict-editor-status-left">
+                  <span id="conflict-editor-lang" class="conflict-editor-chip">plaintext</span>
+                  <span id="conflict-editor-markers" class="conflict-editor-chip"></span>
+                </div>
+                <span class="conflict-editor-hint" data-i18n="conflictEditorShortcutHint">Cmd/Ctrl+S 保存并标记已解决 · Cmd/Ctrl+F 查找替换</span>
+              </div>
+              <div id="conflict-monaco-host" class="conflict-monaco-host"></div>
+              <textarea id="conflict-raw-textarea" class="conflict-raw-textarea hidden" spellcheck="false"></textarea>
             </div>
           </section>
         </div>

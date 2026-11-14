@@ -1,4 +1,6 @@
 .agents
 .claude
+node_modules
 tests
+package-lock.json
 skills-lock.json

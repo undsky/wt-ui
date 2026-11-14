@@ -1105,7 +1105,7 @@ input[type="checkbox"] {
   flex-wrap: wrap;
 }
 
-.conflict-modal-body {
+.modal-dialog > .conflict-modal-body {
   flex: 1;
   min-height: 0;
   padding: 0;
@@ -1327,12 +1327,107 @@ input[type="checkbox"] {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 12px;
+  padding: 10px 12px 12px;
+  gap: 8px;
+}
+
+.conflict-editor-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.conflict-editor-status-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.conflict-editor-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: var(--mono);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.conflict-editor-chip.is-warn {
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.conflict-editor-chip.is-clean {
+  background: var(--success-soft);
+  border-color: var(--success-border);
+  color: var(--success-text);
+}
+
+.conflict-editor-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.conflict-monaco-host {
+  flex: 1;
+  min-height: 300px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--code-bg);
+  position: relative;
+}
+
+.conflict-monaco-loading {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  min-height: 280px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.conflict-deco-ours-header {
+  background: rgba(59, 130, 246, 0.24) !important;
+}
+
+.conflict-deco-ours-body {
+  background: rgba(59, 130, 246, 0.1) !important;
+}
+
+.conflict-deco-base-header {
+  background: rgba(148, 163, 184, 0.22) !important;
+}
+
+.conflict-deco-base-body {
+  background: rgba(148, 163, 184, 0.08) !important;
+}
+
+.conflict-deco-sep {
+  background: rgba(234, 179, 8, 0.16) !important;
+}
+
+.conflict-deco-theirs-body {
+  background: rgba(34, 197, 94, 0.1) !important;
+}
+
+.conflict-deco-theirs-header {
+  background: rgba(34, 197, 94, 0.24) !important;
 }
 
 .conflict-raw-textarea {
   flex: 1;
   width: 100%;
+  min-height: 300px;
   resize: none;
   background: var(--code-bg);
   color: var(--text);
@@ -1361,7 +1456,7 @@ input[type="checkbox"] {
 }
 
 @media (max-width: 860px) {
-  .conflict-modal-body {
+  .modal-dialog > .conflict-modal-body {
     grid-template-columns: 1fr;
     grid-template-rows: 160px minmax(0, 1fr);
   }

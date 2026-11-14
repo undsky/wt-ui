@@ -45,6 +45,7 @@ import {
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, '..', 'public');
+const MONACO_DIR = resolve(__dirname, '..', 'node_modules', 'monaco-editor', 'min');
 const PKG = JSON.parse(readFileSync(resolve(__dirname, '..', 'package.json'), 'utf8'));
 const APP_VERSION = PKG.version || '0.1.0';
 
@@ -52,9 +53,13 @@ const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  '.ttf': 'font/ttf',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
 };
 
 function sendJson(res, statusCode, payload) {
@@ -144,25 +149,35 @@ function checkRequestOrigin(req) {
   return true;
 }
 
-function serveStatic(reqPath, res) {
-  const cleanPath = reqPath === '/' ? '/index.html' : reqPath;
+function serveStaticFromRoot(rootDir, reqPath, res, cacheControl = 'no-store') {
   let decoded;
   try {
-    decoded = decodeURIComponent(cleanPath);
+    decoded = decodeURIComponent(reqPath);
   } catch {
     sendJson(res, 400, { error: 'Bad path' });
     return;
   }
-  const target = resolve(PUBLIC_DIR, `.${decoded}`);
-  const inside = target === PUBLIC_DIR || target.startsWith(PUBLIC_DIR + sep);
+  const normalized = decoded.replace(/^\/+/, '');
+  const target = resolve(rootDir, normalized);
+  const inside = target === rootDir || target.startsWith(rootDir + sep);
   if (!inside || !existsSync(target) || !statSync(target).isFile()) {
     sendJson(res, 404, { error: 'Not found' });
     return;
   }
   const ext = extname(target);
   const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-  res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-store' });
+  res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl });
   res.end(readFileSync(target));
+}
+
+function serveStatic(reqPath, res) {
+  if (reqPath.startsWith('/vendor/monaco/')) {
+    const monacoSubPath = reqPath.slice('/vendor/monaco/'.length);
+    serveStaticFromRoot(MONACO_DIR, monacoSubPath, res, 'public, max-age=3600');
+    return;
+  }
+  const cleanPath = reqPath === '/' ? '/index.html' : reqPath;
+  serveStaticFromRoot(PUBLIC_DIR, cleanPath, res, 'no-store');
 }
 
 export function createAppServer({ wtBin: explicitWtBin } = {}) {
