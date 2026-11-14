@@ -11,6 +11,7 @@ import { browsePath, inspectGitRepo, parseCodeWorkspace, pickNativePath } from '
 import {
   deleteRemoteBranch,
   detectOrStartLocalConflictSession,
+  getWorktreeInProgressOp,
   listGitWorktrees,
   listRemoteBranches,
   mergeRemoteBranch,
@@ -454,6 +455,18 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
 
         const result = await runWt(env.wtBin, project.path, args);
         const parsed = parseWtJson(result.stdout);
+        if (Array.isArray(parsed?.items)) {
+          await Promise.all(
+            parsed.items.map(async (item) => {
+              if (item?.worktree?.path && !item.worktree.operation) {
+                const op = await getWorktreeInProgressOp(item.worktree.path);
+                if (op) {
+                  item.worktree.operation = op;
+                }
+              }
+            })
+          );
+        }
         sendJson(res, result.ok ? 200 : 422, {
           ok: result.ok,
           project,
@@ -825,6 +838,53 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         }
         const workDir = await resolveProjectWorkDir(project, body.workDir);
         const trackedFiles = Array.isArray(body.trackedFiles) ? body.trackedFiles : [];
+        const wantsStream = Boolean(body.stream) || String(req.headers.accept || '').includes('text/event-stream');
+
+        if (wantsStream) {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+          });
+          const sendEvent = (payload) => {
+            if (!res.writableEnded) {
+              res.write(`data: ${JSON.stringify(payload)}\n\n`);
+            }
+          };
+          try {
+            const result = await aiResolveAndCompleteConflictMerge(workDir, {
+              sourceBranch: body.sourceBranch,
+              targetBranch: body.targetBranch,
+              isRemote: Boolean(body.isRemote),
+              autoPush: body.autoPush !== false,
+              deleteRemote: Boolean(body.deleteRemote),
+              trackedFiles,
+              aiConfig: store.aiConfig,
+              onProgress: (ev) => sendEvent(ev),
+            });
+            if (result.ok) {
+              sendEvent({ type: 'done', result });
+            } else {
+              sendEvent({
+                type: 'error',
+                error: result.stderr || result.stdout || '完成合并提交失败',
+                result,
+                status: result.status,
+              });
+            }
+          } catch (err) {
+            const status = await getConflictStatus(workDir, trackedFiles).catch(() => null);
+            sendEvent({
+              type: 'error',
+              error: err?.message || String(err),
+              status,
+            });
+          } finally {
+            if (!res.writableEnded) res.end();
+          }
+          return;
+        }
+
         try {
           const result = await aiResolveAndCompleteConflictMerge(workDir, {
             sourceBranch: body.sourceBranch,

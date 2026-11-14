@@ -523,6 +523,39 @@
       </div>
     </div>
 
+    <!-- Modal: AI Conflict Resolution Progress -->
+    <div
+      id="modal-ai-progress"
+      class="modal modal-ai-progress hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="modal-ai-progress-title"
+    >
+      <div id="modal-ai-progress-backdrop" class="modal-backdrop"></div>
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <div class="ai-progress-header-left">
+            <h3 id="modal-ai-progress-title" data-i18n="aiProgressModalTitle">AI 解决冲突处理过程</h3>
+            <span id="ai-progress-status-badge" class="badge badge-info" data-i18n="aiProgressStatusRunning">处理中</span>
+          </div>
+          <button type="button" id="btn-ai-progress-close-x" class="btn-icon" data-i18n-aria="closeBtn" aria-label="关闭">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="ai-progress-meta">
+            <span id="ai-progress-model-label" class="badge badge-neutral"></span>
+            <span id="ai-progress-counter" class="muted">0 / 0</span>
+          </div>
+          <div class="ai-progress-bar">
+            <div id="ai-progress-fill" class="ai-progress-fill" style="width: 0%"></div>
+          </div>
+          <div id="ai-progress-steps" class="ai-progress-steps"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="btn-ai-progress-close" class="btn btn-primary" data-i18n="closeBtn">关闭</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Modal: Confirm Dialog -->
     <div
       id="modal-confirm"

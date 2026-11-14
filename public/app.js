@@ -699,7 +699,7 @@ function renderWorktrees() {
       <td class="col-actions">
         <div class="actions-cell">
           ${
-            wt?.changes?.conflicted && wt?.path
+            (wt?.changes?.conflicted || wt?.operation) && wt?.path
               ? `<button class="btn btn-warning btn-sm btn-resolve-conflict">${escapeHtml(t('resolveConflictBtn'))}</button>`
               : ''
           }
@@ -2184,7 +2184,15 @@ function renderConflictMainPane() {
   const rawTextarea = $('conflict-raw-textarea');
 
   if (!details) {
-    if (visualPane) visualPane.innerHTML = '';
+    if (visualPane) {
+      visualPane.innerHTML = '';
+      if (cs.unresolvedCount === 0 && (!cs.files || cs.files.length === 0)) {
+        const banner = document.createElement('div');
+        banner.className = 'conflict-resolved-banner';
+        banner.innerHTML = `<span>${escapeHtml(t('conflictPendingFinalizeBanner'))}</span>`;
+        visualPane.appendChild(banner);
+      }
+    }
     if (rawTextarea) rawTextarea.value = '';
     if (conflictEditor.instance?.getModel()) {
       conflictEditor.instance.getModel().setValue('');
@@ -2404,6 +2412,93 @@ async function completeConflictResolution() {
   }
 }
 
+let isAiProgressRunning = false;
+
+function setAiProgressControlsLocked(locked) {
+  isAiProgressRunning = Boolean(locked);
+  const closeBtn = $('btn-ai-progress-close');
+  const closeX = $('btn-ai-progress-close-x');
+  if (closeBtn) closeBtn.disabled = isAiProgressRunning;
+  if (closeX) closeX.disabled = isAiProgressRunning;
+}
+
+function closeAiProgressModal() {
+  if (isAiProgressRunning) return;
+  closeModal('modal-ai-progress');
+}
+
+function openAiProgressModal(model, totalFiles) {
+  const badge = $('ai-progress-status-badge');
+  const modelLabel = $('ai-progress-model-label');
+  const counter = $('ai-progress-counter');
+  const fill = $('ai-progress-fill');
+  const steps = $('ai-progress-steps');
+
+  if (badge) {
+    badge.className = 'badge badge-info';
+    badge.textContent = t('aiProgressStatusRunning');
+  }
+  if (modelLabel) modelLabel.textContent = model || '-';
+  if (counter) counter.textContent = `0 / ${totalFiles}`;
+  if (fill) {
+    fill.className = 'ai-progress-fill';
+    fill.style.width = '5%';
+  }
+  if (steps) steps.innerHTML = '';
+
+  setAiProgressControlsLocked(true);
+  openModal('modal-ai-progress');
+}
+
+function updateAiProgressBar(doneCount, totalFiles, stateClass = '') {
+  const counter = $('ai-progress-counter');
+  const fill = $('ai-progress-fill');
+  if (counter && totalFiles >= 0) {
+    counter.textContent = `${doneCount} / ${totalFiles}`;
+  }
+  if (fill) {
+    const pct = stateClass === 'is-done'
+      ? 100
+      : totalFiles > 0
+        ? Math.min(95, Math.max(8, Math.round((doneCount / totalFiles) * 90)))
+        : 50;
+    fill.style.width = `${pct}%`;
+    fill.className = `ai-progress-fill${stateClass ? ` ${stateClass}` : ''}`;
+  }
+}
+
+function appendAiProgressStep(text, status = 'running') {
+  const steps = $('ai-progress-steps');
+  if (!steps) return;
+  steps.querySelectorAll('.ai-progress-step.is-running').forEach((el) => {
+    el.classList.remove('is-running');
+    el.classList.add('is-done');
+    const icon = el.querySelector('.ai-progress-step-icon');
+    if (icon) icon.textContent = '✓';
+  });
+
+  const row = document.createElement('div');
+  row.className = `ai-progress-step is-${status}`;
+  const iconChar = status === 'done' ? '✓' : status === 'error' ? '✕' : '⏳';
+  const timeStr = new Date().toLocaleTimeString();
+  row.innerHTML = `
+    <span class="ai-progress-step-icon">${iconChar}</span>
+    <span class="ai-progress-step-text">${escapeHtml(text)}</span>
+    <span class="ai-progress-step-time">${escapeHtml(timeStr)}</span>
+  `;
+  steps.appendChild(row);
+  steps.scrollTop = steps.scrollHeight;
+}
+
+function finishAiProgressModal(ok) {
+  const badge = $('ai-progress-status-badge');
+  if (badge) {
+    badge.className = `badge ${ok ? 'badge-success' : 'badge-danger'}`;
+    badge.textContent = t(ok ? 'aiProgressStatusDone' : 'aiProgressStatusError');
+  }
+  setAiProgressControlsLocked(false);
+}
+
 async function aiCompleteConflictResolution() {
   const active = getActiveProject();
   const cs = state.conflictSession;
@@ -2426,9 +2521,17 @@ async function aiCompleteConflictResolution() {
   }
   if (completeBtn) completeBtn.disabled = true;
 
+  let totalFiles = cs.files.filter((f) => !f.resolved || f.unmerged || f.hunkCount > 0).length;
+  let doneFiles = 0;
+  openAiProgressModal(state.aiConfig.model, totalFiles);
+
   try {
-    const res = await api('/api/conflicts/ai-complete', {
+    const resp = await fetch('/api/conflicts/ai-complete', {
       method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
       body: JSON.stringify({
         projectId: active.id,
         workDir: cs.workDir,
@@ -2438,23 +2541,113 @@ async function aiCompleteConflictResolution() {
         autoPush: Boolean($('conflict-auto-push')?.checked ?? cs.autoPush),
         deleteRemote: cs.deleteRemote,
         trackedFiles: cs.trackedFiles,
+        stream: true,
       }),
     });
-    if (Array.isArray(res.resolvedFiles) && res.resolvedFiles.length > 0) {
+
+    if (!resp.ok || !resp.body) {
+      const payload = await resp.json().catch(() => ({}));
+      const err = new Error(payload.error || payload.stderr || `HTTP ${resp.status}`);
+      err.payload = payload;
+      throw err;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalResult = null;
+
+    const handleEvent = (ev) => {
+      if (!ev || !ev.type) return;
+      if (ev.type === 'start') {
+        totalFiles = ev.totalFiles ?? totalFiles;
+        updateAiProgressBar(0, totalFiles);
+        if (totalFiles > 0) {
+          appendAiProgressStep(t('aiProgressStepStart', { model: ev.model || state.aiConfig.model, count: totalFiles }), 'done');
+        } else {
+          appendAiProgressStep(t('aiProgressStepNoFiles'), 'done');
+        }
+      } else if (ev.type === 'file_start') {
+        appendAiProgressStep(
+          t('aiProgressStepFileStart', { index: ev.index, total: ev.total, file: ev.file, hunks: ev.hunkCount || 1 }),
+          'running'
+        );
+      } else if (ev.type === 'file_ai_done') {
+        const sec = ((ev.elapsedMs || 0) / 1000).toFixed(1);
+        appendAiProgressStep(
+          t('aiProgressStepFileAiDone', { index: ev.index, total: ev.total, file: ev.file, sec }),
+          'running'
+        );
+      } else if (ev.type === 'file_done') {
+        doneFiles = ev.index || doneFiles + 1;
+        updateAiProgressBar(doneFiles, ev.total || totalFiles);
+        appendAiProgressStep(
+          t('aiProgressStepFileDone', { index: ev.index, total: ev.total, file: ev.file }),
+          'done'
+        );
+      } else if (ev.type === 'commit_start') {
+        appendAiProgressStep(t('aiProgressStepCommit'), 'running');
+      } else if (ev.type === 'done') {
+        finalResult = ev.result;
+      } else if (ev.type === 'error') {
+        const err = new Error(ev.error || ev.result?.stderr || 'AI Merge failed');
+        err.payload = { ...(ev.result || {}), error: ev.error, status: ev.status };
+        throw err;
+      }
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split('\n\n');
+      buffer = chunks.pop() || '';
+      for (const chunk of chunks) {
+        const dataLines = chunk
+          .split(/\r?\n/)
+          .filter((l) => l.startsWith('data:'))
+          .map((l) => l.slice(5).trimStart());
+        if (dataLines.length === 0) continue;
+        const parsed = JSON.parse(dataLines.join('\n'));
+        handleEvent(parsed);
+      }
+    }
+    if (buffer.trim()) {
+      const dataLines = buffer
+        .split(/\r?\n/)
+        .filter((l) => l.startsWith('data:'))
+        .map((l) => l.slice(5).trimStart());
+      if (dataLines.length > 0) {
+        handleEvent(JSON.parse(dataLines.join('\n')));
+      }
+    }
+
+    if (!finalResult) {
+      throw new Error('AI 合并响应中断，未收到完成结果');
+    }
+
+    updateAiProgressBar(totalFiles, totalFiles, 'is-done');
+    appendAiProgressStep(t('aiProgressStepDone'), 'done');
+    finishAiProgressModal(true);
+
+    if (Array.isArray(finalResult.resolvedFiles) && finalResult.resolvedFiles.length > 0) {
       appendLog(
         t('aiConflictResolveLog', {
-          model: res.aiModel || state.aiConfig.model,
-          files: res.resolvedFiles.join(', '),
+          model: finalResult.aiModel || state.aiConfig.model,
+          files: finalResult.resolvedFiles.join(', '),
         })
       );
     }
-    appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
+    appendLog(t('mergeSuccessLog', { cmd: finalResult.command }), finalResult.stdout || finalResult.stderr);
     showToast(t('aiConflictCompleteSuccessToast'), 'success');
     closeModal('modal-conflict');
     state.conflictSession = null;
     await Promise.all([refreshWorktrees(), refreshRemoteBranches(false)]);
   } catch (err) {
     const msg = err.payload?.error || err.payload?.stderr || err.message;
+    updateAiProgressBar(doneFiles, totalFiles, 'is-error');
+    appendAiProgressStep(t('aiProgressStepFail', { msg }), 'error');
+    finishAiProgressModal(false);
     appendLog(t('mergeFailLog', { cmd: err.payload?.command || 'AI Merge' }), msg);
     showToast(t('mergeFailToast', { msg }), 'error');
     if (err.payload?.status && state.conflictSession) {
@@ -2945,6 +3138,10 @@ function bindEvents() {
   $('btn-confirm-close')?.addEventListener('click', () => settleConfirm(false));
   $('btn-confirm-cancel')?.addEventListener('click', () => settleConfirm(false));
   $('btn-confirm-ok')?.addEventListener('click', () => settleConfirm(true));
+
+  $('modal-ai-progress-backdrop')?.addEventListener('click', closeAiProgressModal);
+  $('btn-ai-progress-close-x')?.addEventListener('click', closeAiProgressModal);
+  $('btn-ai-progress-close')?.addEventListener('click', closeAiProgressModal);
 
   $('btn-add-target').addEventListener('click', () => {
     openModal('modal-browser');

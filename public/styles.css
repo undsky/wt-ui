@@ -1133,6 +1133,100 @@ input[type="checkbox"] {
   z-index: 80;
 }
 
+.modal-ai-progress {
+  z-index: 70;
+}
+
+.ai-progress-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ai-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.ai-progress-bar {
+  width: 100%;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.ai-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s ease, background-color 0.2s ease;
+}
+
+.ai-progress-fill.is-done {
+  background: var(--success);
+}
+
+.ai-progress-fill.is-error {
+  background: var(--danger);
+}
+
+.ai-progress-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--code-bg);
+}
+
+.ai-progress-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.ai-progress-step-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.ai-progress-step.is-running .ai-progress-step-icon {
+  color: var(--accent-text);
+}
+
+.ai-progress-step.is-done .ai-progress-step-icon {
+  color: var(--success-text);
+}
+
+.ai-progress-step.is-error .ai-progress-step-icon {
+  color: var(--danger-text);
+}
+
+.ai-progress-step-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.ai-progress-step-time {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .confirm-message {
   margin: 0;
   font-size: 13.5px;

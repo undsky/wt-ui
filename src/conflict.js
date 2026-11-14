@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import { runGit } from './remote.js';
+import { getWorktreeInProgressOp, runGit } from './remote.js';
 
 /**
  * Ensure a relative file path stays strictly inside `workDir`.
@@ -353,18 +353,19 @@ export async function completeConflictMerge(workDir, options = {}) {
   };
 
   // Check if rebase, merge, or staged changes need to be finalized
-  const rebaseHeadRes = await runGit(workDir, ['rev-parse', '-q', '--verify', 'REBASE_HEAD'], { timeout: 5_000 });
-  const mergeHeadRes = await runGit(workDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { timeout: 5_000 });
-  const statusPorcelain = await runGit(workDir, ['status', '--porcelain'], { timeout: 5_000 });
+  const [inProgressOp, statusPorcelain] = await Promise.all([
+    getWorktreeInProgressOp(workDir),
+    runGit(workDir, ['status', '--porcelain'], { timeout: 5_000 }),
+  ]);
 
-  if (rebaseHeadRes.ok) {
+  if (inProgressOp === 'rebase') {
     const rebaseCont = recordStep(
       await runGit(workDir, ['-c', 'core.editor=true', 'rebase', '--continue'], { timeout: 30_000 })
     );
     if (!rebaseCont.ok) {
       return buildStepsResult(false, steps);
     }
-  } else if (mergeHeadRes.ok || statusPorcelain.stdout.trim()) {
+  } else if (inProgressOp === 'merge' || statusPorcelain.stdout.trim()) {
     const commitMsg = options.sourceBranch
       ? `Merge branch '${options.sourceBranch}' into ${options.targetBranch || 'HEAD'}`
       : 'Merge branch (resolved conflicts in wt-ui)';
@@ -733,10 +734,12 @@ export async function resolveFileWithAi(fileContent, options) {
  *   deleteRemote?: boolean,
  *   trackedFiles?: string[],
  *   aiConfig?: { url: string, key: string, model: string },
+ *   onProgress?: (event: Record<string, any>) => void,
  * }} options
  */
 export async function aiResolveAndCompleteConflictMerge(workDir, options = {}) {
   const aiConfig = options.aiConfig || {};
+  const emit = typeof options.onProgress === 'function' ? options.onProgress : () => {};
   if (!aiConfig.url || !aiConfig.key || !aiConfig.model) {
     throw new Error('请先在「设置 → AI」中完整填写 URL、Key 和 Model');
   }
@@ -745,16 +748,44 @@ export async function aiResolveAndCompleteConflictMerge(workDir, options = {}) {
   const initialStatus = await getConflictStatus(workDir, trackedFiles);
   const unresolvedFiles = initialStatus.files.filter((f) => !f.resolved || f.unmerged || f.hunkCount > 0);
   const resolvedFiles = [];
+  const totalFiles = unresolvedFiles.length;
 
-  for (const fileItem of unresolvedFiles) {
+  emit({
+    type: 'start',
+    model: aiConfig.model,
+    totalFiles,
+    files: unresolvedFiles.map((f) => f.path),
+    sourceBranch: options.sourceBranch || '',
+    targetBranch: options.targetBranch || '',
+  });
+
+  for (let i = 0; i < totalFiles; i += 1) {
+    const fileItem = unresolvedFiles[i];
+    const index = i + 1;
     const details = await readConflictFileDetails(workDir, fileItem.path);
+    emit({
+      type: 'file_start',
+      index,
+      total: totalFiles,
+      file: fileItem.path,
+      hunkCount: details.hunkCount,
+    });
+
     let nextContent = details.content;
     if (details.hunkCount > 0 || /^<{7}\s|^={7}\s*$|^>{7}\s/m.test(details.content)) {
+      const startedAt = Date.now();
       nextContent = await resolveFileWithAi(details.content, {
         filePath: fileItem.path,
         sourceBranch: options.sourceBranch,
         targetBranch: options.targetBranch,
         aiConfig,
+      });
+      emit({
+        type: 'file_ai_done',
+        index,
+        total: totalFiles,
+        file: fileItem.path,
+        elapsedMs: Date.now() - startedAt,
       });
     }
     await resolveConflictFile(workDir, {
@@ -764,7 +795,18 @@ export async function aiResolveAndCompleteConflictMerge(workDir, options = {}) {
       trackedFiles: initialStatus.files.map((f) => f.path),
     });
     resolvedFiles.push(fileItem.path);
+    emit({
+      type: 'file_done',
+      index,
+      total: totalFiles,
+      file: fileItem.path,
+    });
   }
+
+  emit({
+    type: 'commit_start',
+    totalFiles,
+  });
 
   const completeRes = await completeConflictMerge(workDir, {
     sourceBranch: options.sourceBranch,

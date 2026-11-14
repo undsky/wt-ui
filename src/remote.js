@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { formatCommand } from './wt-resolver.js';
@@ -425,6 +426,33 @@ export async function deleteRemoteBranch(repoPath, remoteBranch) {
 }
 
 /**
+ * Detect whether a worktree currently has an active in-progress rebase or merge operation.
+ * Checks `rebase-merge` / `rebase-apply` directories rather than `REBASE_HEAD` alone,
+ * because Git/tools can leave a stale `REBASE_HEAD` behind after a rebase finishes.
+ * @param {string} workDir
+ * @returns {Promise<'rebase' | 'merge' | null>}
+ */
+export async function getWorktreeInProgressOp(workDir) {
+  if (!workDir) return null;
+  const res = await runGit(
+    workDir,
+    ['rev-parse', '--git-path', 'rebase-merge', '--git-path', 'rebase-apply', '--git-path', 'MERGE_HEAD'],
+    { timeout: 5_000 }
+  );
+  if (!res.ok) return null;
+  const [rebaseMergeRel, rebaseApplyRel, mergeHeadRel] = res.stdout
+    .split(/\r?\n/)
+    .map((s) => s.trim());
+  if ((rebaseMergeRel && existsSync(resolve(workDir, rebaseMergeRel))) || (rebaseApplyRel && existsSync(resolve(workDir, rebaseApplyRel)))) {
+    return 'rebase';
+  }
+  if (mergeHeadRel && existsSync(resolve(workDir, mergeHeadRel))) {
+    return 'merge';
+  }
+  return null;
+}
+
+/**
  * When a local `wt merge` fails, inspect worktrees for active conflicts or materialize the merge
  * in the target worktree if `wt merge` refused/aborted due to merge conflicts.
  * @param {string} repoPath
@@ -446,6 +474,33 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
   for (const wt of worktrees) {
     const status = await getConflictStatus(wt.path);
     if (status.unresolvedCount > 0) {
+      return {
+        hasConflicts: true,
+        conflictSession: {
+          workDir: wt.path,
+          sourceBranch,
+          targetBranch: wt.branch || targetBranch,
+          isRemote: false,
+          autoPush: false,
+          deleteRemote: false,
+          files: status.files,
+          unmergedFiles: status.unmergedFiles,
+        },
+      };
+    }
+  }
+
+  // 1b. If a git rebase/merge is already in progress (e.g. staged conflicts awaiting --continue / --abort),
+  // open the conflict modal for that worktree so the user can finish or abort it directly in the UI.
+  const sortedWts = [...worktrees].sort((a, b) => {
+    const aScore = a.branch === sourceBranch ? 2 : a.branch === targetBranch ? 1 : 0;
+    const bScore = b.branch === sourceBranch ? 2 : b.branch === targetBranch ? 1 : 0;
+    return bScore - aScore;
+  });
+  for (const wt of sortedWts) {
+    const inProgressOp = await getWorktreeInProgressOp(wt.path);
+    if (inProgressOp) {
+      const status = await getConflictStatus(wt.path);
       return {
         hasConflicts: true,
         conflictSession: {
@@ -539,19 +594,16 @@ export async function pullWorktreeBranch(repoPath, options = {}) {
   }
 
   // Guard against pulling while a rebase or merge is already in progress (which detaches HEAD).
-  const [rebaseHeadRes, mergeHeadRes] = await Promise.all([
-    runGit(workDir, ['rev-parse', '-q', '--verify', 'REBASE_HEAD'], { timeout: 5_000 }),
-    runGit(workDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { timeout: 5_000 }),
-  ]);
-  if (rebaseHeadRes.ok || mergeHeadRes.ok) {
-    const opName = rebaseHeadRes.ok ? '变基 (rebase)' : '合并 (merge)';
-    const hintCmd = rebaseHeadRes.ok ? 'git rebase --continue / --abort' : 'git commit / git merge --abort';
+  const inProgressOp = await getWorktreeInProgressOp(workDir);
+  if (inProgressOp) {
+    const opName = inProgressOp === 'rebase' ? '变基 (rebase)' : '合并 (merge)';
+    const hintCmd = inProgressOp === 'rebase' ? 'git rebase --continue / --abort' : 'git commit / git merge --abort';
     return {
       ok: false,
       hasConflicts: false,
       command: formatCommand('git', ['-C', workDir, 'status']),
       stdout: '',
-      stderr: `当前工作树存在未完成的${opName}操作，无法直接拉取。请先完成或放弃当前操作 (${hintCmd})。`,
+      stderr: `当前工作树存在未完成的${opName}，无法直接拉取。请点击「解决冲突」中的「完成合并并提交」或「放弃合并」完成收尾（或终端执行 ${hintCmd}），切勿点击「移除」。`,
       conflictSession: null,
     };
   }
