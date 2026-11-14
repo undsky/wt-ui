@@ -16,16 +16,12 @@ const state = {
   activeSettingsTab: 'general',
   openTabIds: [],
   worktreeCache: {},
-  remoteCache: {},
   activeProjectId: null,
   worktreeData: null,
-  remoteData: null,
-  branchMode: 'local',
   browseCurrentPath: '',
   browseParentPath: null,
   mergeTargetBranch: null,
   mergeAllMode: false,
-  mergeIsRemote: false,
   conflictSession: null,
 };
 
@@ -525,70 +521,6 @@ function renderMainProject() {
   renderToolSelects();
 }
 
-function applyBranchModeUI() {
-  const isRemote = state.branchMode === 'remote';
-  const localBtn = $('btn-mode-local');
-  const remoteBtn = $('btn-mode-remote');
-  if (localBtn) {
-    localBtn.classList.toggle('active', !isRemote);
-    localBtn.setAttribute('aria-selected', !isRemote ? 'true' : 'false');
-  }
-  if (remoteBtn) {
-    remoteBtn.classList.toggle('active', isRemote);
-    remoteBtn.setAttribute('aria-selected', isRemote ? 'true' : 'false');
-  }
-
-  const titleEl = $('list-card-title');
-  if (titleEl) {
-    titleEl.dataset.i18n = isRemote ? 'remoteListTitle' : 'worktreeListTitle';
-    titleEl.textContent = t(isRemote ? 'remoteListTitle' : 'worktreeListTitle');
-  }
-
-  $('local-branches-toggle-wrap')?.classList.toggle('hidden', isRemote);
-  $('remote-hide-merged-wrap')?.classList.toggle('hidden', !isRemote);
-  $('btn-fetch-remote')?.classList.toggle('hidden', !isRemote);
-
-  const thBranch = $('th-branch');
-  if (thBranch) {
-    thBranch.dataset.i18n = isRemote ? 'colRemoteBranchStatus' : 'colBranchStatus';
-    thBranch.textContent = t(isRemote ? 'colRemoteBranchStatus' : 'colBranchStatus');
-  }
-  const thDiff = $('th-diff');
-  if (thDiff) {
-    thDiff.dataset.i18n = isRemote ? 'colDiffTarget' : 'colDiffDefault';
-    thDiff.textContent = t(isRemote ? 'colDiffTarget' : 'colDiffDefault');
-  }
-  const thRemoteMeta = $('th-remote-meta');
-  if (thRemoteMeta) {
-    thRemoteMeta.classList.toggle('hidden', !isRemote);
-  }
-}
-
-async function setBranchMode(mode) {
-  const next = mode === 'remote' ? 'remote' : 'local';
-  const changed = state.branchMode !== next;
-  state.branchMode = next;
-  applyBranchModeUI();
-
-  if (next === 'remote') {
-    const active = getActiveProject();
-    if (active && state.remoteCache[active.id]) {
-      state.remoteData = state.remoteCache[active.id];
-      renderWorktrees();
-    } else {
-      renderWorktrees();
-    }
-    if (changed) {
-      await refreshRemoteBranches(!state.remoteCache[active?.id]);
-    }
-  } else {
-    renderWorktrees();
-    if (changed) {
-      await refreshWorktrees();
-    }
-  }
-}
-
 const ACTION_ICON_PATHS = {
   conflict: '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
   open: '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
@@ -604,18 +536,17 @@ function renderActionIcon(name) {
   return `<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 }
 
-function renderOpenActionButton({ cls, hasWorktree, toolName, fallbackLabel }) {
+function renderOpenActionButton({ cls, hasWorktree, toolName }) {
   if (hasWorktree) {
     const label = toolName || t('toolFallback');
     const title = t('openWithTool', { tool: label });
     return `<button type="button" class="btn btn-secondary btn-action btn-open-tool ${cls}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${renderActionIcon('open')}<span class="btn-label btn-tool-name">${escapeHtml(label)}</span></button>`;
   }
-  const title = fallbackLabel || t('createAndOpen');
-  return `<button type="button" class="btn btn-secondary btn-action ${cls}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${renderActionIcon(fallbackLabel ? 'open' : 'plus')}<span class="btn-label">${escapeHtml(title)}</span></button>`;
+  const title = t('createAndOpen');
+  return `<button type="button" class="btn btn-secondary btn-action ${cls}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${renderActionIcon('plus')}<span class="btn-label">${escapeHtml(title)}</span></button>`;
 }
 
 function renderRowActionsHtml({
-  mode = 'local',
   hasConflict = false,
   hasSync = false,
   remoteAhead = 0,
@@ -644,33 +575,24 @@ function renderRowActionsHtml({
   const toolSlotHtml = `<div class="action-slot action-slot-tool">${openBtnHtml}</div>`;
 
   let syncSlotHtml = '';
-  if (mode === 'local') {
-    if (hasSync) {
-      const pushTitle = remoteAhead > 0 ? t('pushBtnAhead', { ahead: remoteAhead }) : t('pushBtn');
-      syncSlotHtml = `<div class="action-slot action-slot-sync"><div class="action-btn-group" role="group">
+  if (hasSync) {
+    const pushTitle = remoteAhead > 0 ? t('pushBtnAhead', { ahead: remoteAhead }) : t('pushBtn');
+    syncSlotHtml = `<div class="action-slot action-slot-sync"><div class="action-btn-group" role="group">
         <button type="button" class="btn-group-item btn-pull-wt" title="${escapeHtml(t('pullBtn'))}">${renderActionIcon('pull')}<span class="btn-label">${escapeHtml(t('pullBtn'))}</span></button>
         <button type="button" class="btn-group-item ${remoteAhead > 0 ? 'is-accent ' : ''}btn-push-wt" title="${escapeHtml(pushTitle)}">${renderActionIcon('push')}<span class="btn-label">${escapeHtml(t('pushBtn'))}</span>${remoteAhead > 0 ? `<span class="action-count-badge">${remoteAhead}</span>` : ''}</button>
       </div></div>`;
-    } else {
-      syncSlotHtml = '<div class="action-slot action-slot-sync action-slot-empty" aria-hidden="true"></div>';
-    }
+  } else {
+    syncSlotHtml = '<div class="action-slot action-slot-sync action-slot-empty" aria-hidden="true"></div>';
   }
 
   const dangerSlotHtml = removeBtnCls
     ? `<div class="action-slot action-slot-danger"><span class="action-divider" aria-hidden="true"></span><button type="button" class="btn-icon-danger ${removeBtnCls}" title="${escapeHtml(removeLabel)}" aria-label="${escapeHtml(removeLabel)}">${renderActionIcon('trash')}</button></div>`
     : '<div class="action-slot action-slot-danger action-slot-empty" aria-hidden="true"></div>';
 
-  const modeClass = mode === 'remote' ? 'actions-cell--remote' : 'actions-cell--local';
-  return `<div class="actions-cell ${modeClass}">${mergeSlotHtml}${toolSlotHtml}${syncSlotHtml}${dangerSlotHtml}</div>`;
+  return `<div class="actions-cell">${mergeSlotHtml}${toolSlotHtml}${syncSlotHtml}${dangerSlotHtml}</div>`;
 }
 
 function renderWorktrees() {
-  applyBranchModeUI();
-  if (state.branchMode === 'remote') {
-    renderRemoteBranches();
-    return;
-  }
-
   const tbody = $('worktree-tbody');
   tbody.innerHTML = '';
 
@@ -807,108 +729,6 @@ function renderWorktrees() {
   }
 }
 
-function renderRemoteBranches() {
-  const tbody = $('worktree-tbody');
-  tbody.innerHTML = '';
-
-  const allItems = state.remoteData?.items || [];
-  const hideMerged = $('toggle-hide-merged-remote')?.checked;
-  const items = hideMerged ? allItems.filter((item) => !item.merged || item.isDefault || item.isTarget) : allItems;
-
-  $('wt-count').textContent = String(items.length);
-  const mergeAllBtn = $('btn-merge-all');
-  if (mergeAllBtn) {
-    mergeAllBtn.classList.toggle('hidden', getMergeableRemoteBranches().length === 0);
-  }
-
-  if (items.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="4" class="muted">${escapeHtml(t('noRemoteData'))}</td></tr>`;
-    return;
-  }
-
-  for (const item of items) {
-    const tr = document.createElement('tr');
-    const pills = [];
-    if (item.isDefault) {
-      pills.push(`<span class="badge badge-success">${escapeHtml(t('defaultBranchTag'))}</span>`);
-    }
-    if (item.ahead > 0) {
-      pills.push(`<span class="badge badge-warn">${escapeHtml(t('remoteAheadBadge', { ahead: item.ahead }))}</span>`);
-    } else if (item.merged) {
-      pills.push(`<span class="badge badge-success">${escapeHtml(t('remoteMergedBadge'))}</span>`);
-    }
-    if (item.worktreePath) {
-      pills.push(`<span class="badge badge-info">${escapeHtml(t('localWorktreeExistsBadge'))}</span>`);
-    } else if (item.hasLocalBranch) {
-      pills.push(`<span class="badge badge-neutral">${escapeHtml(t('localBranchExistsBadge'))}</span>`);
-    }
-
-    const divParts = [];
-    if (item.isDefault || item.isTarget) {
-      divParts.push(`<span class="muted">${escapeHtml(t('baseBranchTag'))}</span>`);
-    } else {
-      if (item.ahead || item.behind) {
-        divParts.push(`<span>↑${item.ahead ?? 0} ↓${item.behind ?? 0}</span>`);
-      }
-      if (item.diff && (item.diff.added || item.diff.deleted)) {
-        divParts.push(`<span class="mono">+${item.diff.added} -${item.diff.deleted}</span>`);
-      }
-    }
-
-    const metaParts = [`<span class="badge badge-neutral">${escapeHtml(item.remote)}</span>`];
-    if (item.head?.author) {
-      metaParts.push(`<span class="muted">${escapeHtml(item.head.author)}</span>`);
-    }
-
-    const boundTool = getWorktreeTool(item.branch);
-    const remoteActionsHtml = renderRowActionsHtml({
-      mode: 'remote',
-      openBtnHtml: renderOpenActionButton({
-        cls: 'btn-checkout-remote',
-        hasWorktree: Boolean(item.worktreePath),
-        toolName: boundTool?.name,
-        fallbackLabel: t('checkoutWorktreeBtn'),
-      }),
-      mergeBtnCls: !item.isDefault ? 'btn-merge-remote' : '',
-      removeBtnCls: !item.isDefault ? 'btn-delete-remote' : '',
-      removeLabel: t('deleteBtn'),
-    });
-
-    tr.innerHTML = `
-      <td>
-        <div class="branch-cell">
-          <div class="branch-main">
-            <span class="gutter-symbol">☁</span>
-            <strong>${escapeHtml(item.fullRef)}</strong>
-          </div>
-          ${pills.length > 0 ? `<div class="status-pills">${pills.join('')}</div>` : ''}
-        </div>
-      </td>
-      <td><div class="diff-stats">${divParts.join('') || `<span class="muted">${escapeHtml(t('noDiff'))}</span>`}</div></td>
-      <td><div class="status-pills">${metaParts.join(' ')}</div></td>
-      <td class="col-actions">${remoteActionsHtml}</td>
-    `;
-
-    const mergeBtn = tr.querySelector('.btn-merge-remote');
-    if (mergeBtn) {
-      mergeBtn.addEventListener('click', () => openRemoteMergeModal(item.fullRef));
-    }
-
-    tr.querySelector('.btn-checkout-remote').addEventListener('click', () => {
-      const shouldCreate = !item.hasLocalBranch && !item.worktreePath;
-      const toolId = item.worktreePath ? boundTool?.id : ($('select-tool').value || 'claude');
-      openWorktreeRow(item.branch, shouldCreate, shouldCreate ? item.fullRef : '', toolId);
-    });
-
-    const delBtn = tr.querySelector('.btn-delete-remote');
-    if (delBtn) {
-      delBtn.addEventListener('click', () => deleteRemoteBranchRow(item.fullRef));
-    }
-
-    tbody.appendChild(tr);
-  }
-}
-
 async function loadHealth(autoOpenGuide = false) {
   state.env = await api('/api/health');
   renderEnv(autoOpenGuide);
@@ -975,53 +795,6 @@ async function refreshWorktrees() {
   }
 }
 
-async function refreshRemoteBranches(fetchRemote = false) {
-  const active = getActiveProject();
-  if (!active || !state.openTabIds.includes(active.id)) return;
-  const fetchBtn = $('btn-fetch-remote');
-  if (fetchRemote && fetchBtn) {
-    fetchBtn.disabled = true;
-    fetchBtn.textContent = t('fetchingRemoteBtn');
-  }
-  try {
-    const fetchParam = fetchRemote ? '&fetch=1' : '';
-    const res = await api(`/api/remote/branches?projectId=${encodeURIComponent(active.id)}${fetchParam}`);
-    state.remoteCache[active.id] = res.data;
-    if (state.activeProjectId === active.id) {
-      state.remoteData = res.data;
-      renderWorktrees();
-    }
-    if (fetchRemote && res.data?.fetchCommand) {
-      const out = [res.data.fetchStdout, res.data.fetchStderr].filter(Boolean).join('\n');
-      if (res.data.fetchOk) {
-        appendLog(t('fetchRemoteSuccessLog', { cmd: res.data.fetchCommand }), out);
-        showToast(t('fetchRemoteSuccessToast'), 'success');
-      } else {
-        appendLog(t('fetchRemoteWarnLog', { cmd: res.data.fetchCommand }), out);
-      }
-    }
-  } catch (err) {
-    if (state.activeProjectId === active.id) {
-      state.remoteData = null;
-      renderWorktrees();
-    }
-    appendLog(t('fetchRemoteFail'), err.payload?.stderr || err.message);
-  } finally {
-    if (fetchBtn) {
-      fetchBtn.disabled = false;
-      fetchBtn.textContent = t('fetchRemoteBtn');
-    }
-  }
-}
-
-async function refreshCurrentList() {
-  if (state.branchMode === 'remote') {
-    await refreshRemoteBranches(false);
-  } else {
-    await refreshWorktrees();
-  }
-}
-
 async function selectProject(projectId) {
   if (!state.openTabIds.includes(projectId)) {
     state.openTabIds.push(projectId);
@@ -1029,7 +802,6 @@ async function selectProject(projectId) {
   }
   state.activeProjectId = projectId;
   state.worktreeData = state.worktreeCache[projectId] || null;
-  state.remoteData = state.remoteCache[projectId] || null;
   renderSidebar();
   renderMainProject();
   renderWorktrees();
@@ -1038,9 +810,6 @@ async function selectProject(projectId) {
     body: JSON.stringify({ projectId }),
   });
   await refreshWorktrees();
-  if (state.branchMode === 'remote') {
-    await refreshRemoteBranches(!state.remoteCache[projectId]);
-  }
 }
 
 async function closeTab(projectId) {
@@ -1057,7 +826,6 @@ async function closeTab(projectId) {
     }
     state.activeProjectId = null;
     state.worktreeData = null;
-    state.remoteData = null;
   }
   renderSidebar();
   renderMainProject();
@@ -1066,13 +834,13 @@ async function closeTab(projectId) {
 async function deleteProject(projectId) {
   await api(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
   await loadState();
-  await refreshCurrentList();
+  await refreshWorktrees();
 }
 
 async function deleteWorkspace(wsId) {
   await api(`/api/workspaces/${encodeURIComponent(wsId)}`, { method: 'DELETE' });
   await loadState();
-  await refreshCurrentList();
+  await refreshWorktrees();
 }
 
 async function switchWorktreeWithClobberPrompt(payload) {
@@ -1119,10 +887,7 @@ async function openWorktreeRow(branch, shouldCreate, base = '', explicitToolId =
     }
     appendLog(t('logExec', { cmd: res.command }), res.stdout || res.stderr || t('openedFallback'));
     showToast(t('openedWorktreeToast', { branch }), 'success');
-    await Promise.all([
-      refreshWorktrees(),
-      state.branchMode === 'remote' ? refreshRemoteBranches(false) : Promise.resolve(),
-    ]);
+    await refreshWorktrees();
   } catch (err) {
     if (!err.clobberCancelled) {
       appendLog(t('logFail', { target: err.payload?.command || branch }), err.payload?.stderr || err.message);
@@ -1162,10 +927,7 @@ async function pullWorktreeRow(workDir, branch, btnEl) {
     const out = [res.stdout, res.stderr].filter(Boolean).join('\n');
     appendLog(t('pullSuccessLog', { cmd: res.command }), out);
     showToast(t('pullSuccessToast', { branch }), 'success');
-    await Promise.all([
-      refreshWorktrees(),
-      state.remoteCache[active.id] ? refreshRemoteBranches(false) : Promise.resolve(),
-    ]);
+    await refreshWorktrees();
   } catch (err) {
     const out = [err.payload?.stdout, err.payload?.stderr].filter(Boolean).join('\n') || err.message;
     appendLog(t('pullFailLog', { cmd: err.payload?.command || '' }), out);
@@ -1197,10 +959,7 @@ async function pushWorktreeRow(workDir, branch, btnEl) {
     const out = [res.stdout, res.stderr].filter(Boolean).join('\n');
     appendLog(t('pushSuccessLog', { cmd: res.command }), out);
     showToast(t('pushSuccessToast', { branch }), 'success');
-    await Promise.all([
-      refreshWorktrees(),
-      state.remoteCache[active.id] ? refreshRemoteBranches(false) : Promise.resolve(),
-    ]);
+    await refreshWorktrees();
   } catch (err) {
     const out = [err.payload?.stdout, err.payload?.stderr].filter(Boolean).join('\n') || err.message;
     appendLog(t('pushFailLog', { cmd: err.payload?.command || '' }), out);
@@ -1215,22 +974,16 @@ function populateMergeTargetSelect(sourceBranch) {
   if (!selectEl) return;
 
   const items = state.worktreeData?.items || [];
-  const remoteLocalBranches = state.remoteData?.localBranches || [];
-  const defaultBranch =
-    state.worktreeData?.repo?.default_branch || state.remoteData?.defaultBranch || 'main';
-  const mainBranch = state.remoteData?.targetBranch || getMainWorktreeBranch(state.worktreeData);
+  const defaultBranch = state.worktreeData?.repo?.default_branch || 'main';
+  const mainBranch = getMainWorktreeBranch(state.worktreeData);
 
-  const shortSource = String(sourceBranch || '').replace(/^[^/]+\//, '');
   const branchNames = [];
   const addBranch = (b) => {
-    if (b && b !== sourceBranch && b !== shortSource && !branchNames.includes(b)) branchNames.push(b);
+    if (b && b !== sourceBranch && !branchNames.includes(b)) branchNames.push(b);
   };
   addBranch(mainBranch);
   for (const item of items) {
     if (item.branch) addBranch(item.branch);
-  }
-  for (const b of remoteLocalBranches) {
-    addBranch(b);
   }
   addBranch(defaultBranch);
 
@@ -1263,41 +1016,9 @@ function getMergeableWorktreeBranches(targetBranch = '') {
     .map((item) => item.branch);
 }
 
-function getMergeableRemoteBranches(targetBranch = '') {
-  const items = state.remoteData?.items || [];
-  const defaultBranch = state.remoteData?.defaultBranch || 'main';
-  const effectiveTarget = targetBranch || state.remoteData?.targetBranch || defaultBranch;
-  return items
-    .filter(
-      (item) =>
-        !item.isDefault &&
-        item.branch !== effectiveTarget &&
-        item.fullRef !== effectiveTarget &&
-        item.ahead > 0
-    )
-    .map((item) => item.fullRef);
-}
-
-function configureMergeModalMode(isRemote, summaryText = '') {
-  state.mergeIsRemote = Boolean(isRemote);
-  $('local-merge-options')?.classList.toggle('hidden', state.mergeIsRemote);
-  $('remote-merge-options')?.classList.toggle('hidden', !state.mergeIsRemote);
-  const summaryEl = $('merge-source-summary');
-  if (summaryEl) {
-    if (summaryText) {
-      summaryEl.textContent = summaryText;
-      summaryEl.classList.remove('hidden');
-    } else {
-      summaryEl.textContent = '';
-      summaryEl.classList.add('hidden');
-    }
-  }
-}
-
 function openMergeModal(branch) {
   state.mergeAllMode = false;
   state.mergeTargetBranch = branch;
-  configureMergeModalMode(false, '');
   const titleEl = $('modal-merge-title');
   if (titleEl) titleEl.textContent = t('mergeModalTitle');
   populateMergeTargetSelect(branch);
@@ -1310,48 +1031,13 @@ function openMergeModal(branch) {
   openModal('modal-merge');
 }
 
-function openRemoteMergeModal(fullRef) {
-  state.mergeAllMode = false;
-  state.mergeTargetBranch = fullRef;
-  configureMergeModalMode(true, t('remoteMergeSummarySingle', { branch: fullRef }));
-  const titleEl = $('modal-merge-title');
-  if (titleEl) titleEl.textContent = t('remoteMergeModalTitle');
-  populateMergeTargetSelect(fullRef);
-  $('remote-merge-push').checked = false;
-  $('remote-merge-no-ff').checked = false;
-  $('remote-merge-squash').checked = false;
-  $('remote-merge-delete').checked = false;
-  openModal('modal-merge');
-}
-
 function openMergeAllModal() {
-  if (state.branchMode === 'remote') {
-    const branches = getMergeableRemoteBranches();
-    if (branches.length === 0) {
-      showToast(t('noMergeableRemoteToast'), 'info');
-      return;
-    }
-    state.mergeAllMode = true;
-    state.mergeTargetBranch = null;
-    configureMergeModalMode(true, t('remoteMergeSummaryAll', { count: branches.length }));
-    const titleEl = $('modal-merge-title');
-    if (titleEl) titleEl.textContent = t('remoteMergeAllModalTitle');
-    populateMergeTargetSelect('');
-    $('remote-merge-push').checked = false;
-    $('remote-merge-no-ff').checked = false;
-    $('remote-merge-squash').checked = false;
-    $('remote-merge-delete').checked = false;
-    openModal('modal-merge');
-    return;
-  }
-
   if (getMergeableWorktreeBranches().length === 0) {
     showToast(t('noMergeableBranchesToast'), 'info');
     return;
   }
   state.mergeAllMode = true;
   state.mergeTargetBranch = null;
-  configureMergeModalMode(false, '');
   const titleEl = $('modal-merge-title');
   if (titleEl) titleEl.textContent = t('mergeAllModalTitle');
   populateMergeTargetSelect('');
@@ -1364,109 +1050,12 @@ function openMergeAllModal() {
   openModal('modal-merge');
 }
 
-async function confirmRemoteMerge(active, target, btn, origLabel) {
-  const remoteOptions = {
-    projectId: active.id,
-    target,
-    autoPush: $('remote-merge-push').checked,
-    noFf: $('remote-merge-no-ff').checked,
-    squash: $('remote-merge-squash').checked,
-    deleteRemote: $('remote-merge-delete').checked,
-  };
-
-  if (!state.mergeAllMode) {
-    btn.disabled = true;
-    try {
-      const res = await api('/api/remote/merge', {
-        method: 'POST',
-        body: JSON.stringify({ ...remoteOptions, branch: state.mergeTargetBranch }),
-      });
-      appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
-      showToast(t('mergeSuccessToast', { branch: state.mergeTargetBranch }), 'success');
-      closeModal('modal-merge');
-      await Promise.all([refreshRemoteBranches(false), refreshWorktrees()]);
-    } catch (err) {
-      appendLog(t('mergeFailLog', { cmd: err.payload?.command || '' }), err.payload?.stderr || err.message);
-      if (err.payload?.hasConflicts && err.payload?.conflictSession) {
-        closeModal('modal-merge');
-        showToast(t('conflictDetectedToast'), 'info');
-        await openConflictModal(err.payload.conflictSession);
-        await Promise.all([refreshRemoteBranches(false), refreshWorktrees()]);
-      } else {
-        showToast(t('mergeFailToast', { msg: err.payload?.stderr || err.message }), 'error');
-      }
-    } finally {
-      btn.disabled = false;
-    }
-    return;
-  }
-
-  const branches = getMergeableRemoteBranches(target);
-  if (branches.length === 0) {
-    showToast(t('noMergeableRemoteToast'), 'info');
-    closeModal('modal-merge');
-    return;
-  }
-
-  btn.disabled = true;
-  let done = 0;
-  try {
-    for (let i = 0; i < branches.length; i += 1) {
-      const branch = branches[i];
-      const isLast = i === branches.length - 1;
-      btn.textContent = t('mergingProgressBtn', { done: done + 1, total: branches.length });
-      try {
-        const res = await api('/api/remote/merge', {
-          method: 'POST',
-          body: JSON.stringify({
-            ...remoteOptions,
-            branch,
-            // When batch merging, push once on the final branch (unless deleteRemote is also set)
-            autoPush: remoteOptions.autoPush && isLast,
-          }),
-        });
-        done += 1;
-        appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
-      } catch (err) {
-        const msg = err.payload?.stderr || err.message;
-        appendLog(t('mergeFailLog', { cmd: err.payload?.command || branch }), msg);
-        if (err.payload?.hasConflicts && err.payload?.conflictSession) {
-          closeModal('modal-merge');
-          showToast(t('conflictDetectedToast'), 'info');
-          await openConflictModal(err.payload.conflictSession);
-        } else {
-          showToast(t('mergeAllPartialFailToast', { done, total: branches.length, branch, msg }), 'error');
-        }
-        await Promise.all([refreshRemoteBranches(false), refreshWorktrees()]);
-        return;
-      }
-    }
-    closeModal('modal-merge');
-    showToast(
-      t('remoteMergeAllSuccessToast', {
-        count: done,
-        target: target || state.remoteData?.targetBranch || 'main',
-      }),
-      'success'
-    );
-    await Promise.all([refreshRemoteBranches(false), refreshWorktrees()]);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = origLabel;
-  }
-}
-
 async function confirmMerge() {
   const active = getActiveProject();
   if (!active || (!state.mergeAllMode && !state.mergeTargetBranch)) return;
   const btn = $('btn-confirm-merge');
   const origLabel = btn.textContent;
   const target = $('merge-target').value.trim();
-
-  if (state.mergeIsRemote) {
-    await confirmRemoteMerge(active, target, btn, origLabel);
-    return;
-  }
 
   const autoPush = Boolean($('merge-auto-push')?.checked);
   const commonOptions = {
@@ -1565,9 +1154,7 @@ async function openConflictModal(session) {
     workDir: session.workDir,
     sourceBranch: session.sourceBranch || '',
     targetBranch: session.targetBranch || '',
-    isRemote: Boolean(session.isRemote),
     autoPush,
-    deleteRemote: Boolean(session.deleteRemote),
     files,
     trackedFiles,
     unresolvedCount,
@@ -1598,9 +1185,7 @@ async function openExistingWorktreeConflictModal(workDir, branchName) {
       workDir: res.status.workDir,
       sourceBranch: '',
       targetBranch: branchName,
-      isRemote: false,
       autoPush: false,
-      deleteRemote: false,
       files: res.status.files,
     });
   } catch (err) {
@@ -2434,16 +2019,14 @@ async function completeConflictResolution() {
         workDir: cs.workDir,
         sourceBranch: cs.sourceBranch,
         targetBranch: cs.targetBranch,
-        isRemote: cs.isRemote,
         autoPush: Boolean($('conflict-auto-push')?.checked ?? cs.autoPush),
-        deleteRemote: cs.deleteRemote,
       }),
     });
     appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
     showToast(t('conflictCompleteSuccessToast'), 'success');
     closeModal('modal-conflict');
     state.conflictSession = null;
-    await Promise.all([refreshWorktrees(), refreshRemoteBranches(false)]);
+    await refreshWorktrees();
   } catch (err) {
     const msg = err.payload?.stderr || err.message;
     appendLog(t('mergeFailLog', { cmd: err.payload?.command || '' }), msg);
@@ -2577,9 +2160,7 @@ async function aiCompleteConflictResolution() {
         workDir: cs.workDir,
         sourceBranch: cs.sourceBranch,
         targetBranch: cs.targetBranch,
-        isRemote: cs.isRemote,
         autoPush: Boolean($('conflict-auto-push')?.checked ?? cs.autoPush),
-        deleteRemote: cs.deleteRemote,
         trackedFiles: cs.trackedFiles,
         stream: true,
       }),
@@ -2682,7 +2263,7 @@ async function aiCompleteConflictResolution() {
     showToast(t('aiConflictCompleteSuccessToast'), 'success');
     closeModal('modal-conflict');
     state.conflictSession = null;
-    await Promise.all([refreshWorktrees(), refreshRemoteBranches(false)]);
+    await refreshWorktrees();
   } catch (err) {
     const msg = err.payload?.error || err.payload?.stderr || err.message;
     updateAiProgressBar(doneFiles, totalFiles, 'is-error');
@@ -2732,33 +2313,9 @@ async function abortConflictResolution() {
     showToast(t('mergeAbortedToast'), 'info');
     closeModal('modal-conflict');
     state.conflictSession = null;
-    await Promise.all([refreshWorktrees(), refreshRemoteBranches(false)]);
+    await refreshWorktrees();
   } catch (err) {
     showToast(err.payload?.stderr || err.message, 'error');
-  }
-}
-
-async function deleteRemoteBranchRow(fullRef) {
-  const active = getActiveProject();
-  if (!active) return;
-  const confirmed = await showConfirm({
-    title: t('deleteRemoteBranchConfirmTitle'),
-    message: t('deleteRemoteBranchConfirm', { branch: fullRef }),
-    danger: true,
-  });
-  if (!confirmed) return;
-  try {
-    const res = await api('/api/remote/delete', {
-      method: 'POST',
-      body: JSON.stringify({ projectId: active.id, branch: fullRef }),
-    });
-    appendLog(t('deleteRemoteSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
-    showToast(t('deleteRemoteSuccessToast', { branch: fullRef }), 'success');
-    await refreshRemoteBranches(false);
-  } catch (err) {
-    const msg = err.payload?.stderr || err.message;
-    appendLog(t('logFail', { target: err.payload?.command || fullRef }), msg);
-    showToast(msg, 'error');
   }
 }
 
@@ -2883,9 +2440,6 @@ async function addTargetPath(rawPath) {
     closeModal('modal-browser');
     await loadState();
     await refreshWorktrees();
-    if (state.branchMode === 'remote') {
-      await refreshRemoteBranches(true);
-    }
   } catch (err) {
     showToast(err.message, 'error');
   }
@@ -3226,25 +2780,9 @@ function bindEvents() {
   $('btn-pick-folder').addEventListener('click', () => pickNative('folder'));
   $('btn-pick-workspace').addEventListener('click', () => pickNative('workspace'));
 
-  $('btn-mode-local').addEventListener('click', () => setBranchMode('local'));
-  $('btn-mode-remote').addEventListener('click', () => setBranchMode('remote'));
-  $('btn-fetch-remote').addEventListener('click', () => refreshRemoteBranches(true));
-  $('toggle-hide-merged-remote').addEventListener('change', renderWorktrees);
-
-  $('btn-refresh').addEventListener('click', refreshCurrentList);
+  $('btn-refresh').addEventListener('click', refreshWorktrees);
   $('btn-merge-all').addEventListener('click', openMergeAllModal);
   $('toggle-branches').addEventListener('change', refreshWorktrees);
-
-  $('remote-merge-squash').addEventListener('change', () => {
-    if ($('remote-merge-squash').checked) {
-      $('remote-merge-no-ff').checked = false;
-    }
-  });
-  $('remote-merge-no-ff').addEventListener('change', () => {
-    if ($('remote-merge-no-ff').checked) {
-      $('remote-merge-squash').checked = false;
-    }
-  });
 
   $('select-tool').addEventListener('change', () => {
     updateCommandPreview();

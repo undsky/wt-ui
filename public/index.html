@@ -132,10 +132,6 @@
                   <div class="list-title-group">
                     <h2 id="list-card-title" data-i18n="worktreeListTitle">工作树列表</h2>
                     <span id="wt-count" class="badge badge-neutral">0</span>
-                    <div class="mode-switch" role="tablist" data-i18n-aria="branchModeAria" aria-label="分支操作模式">
-                      <button type="button" id="btn-mode-local" class="mode-switch-btn active" role="tab" aria-selected="true" data-i18n="localModeBtn">本地模式</button>
-                      <button type="button" id="btn-mode-remote" class="mode-switch-btn" role="tab" aria-selected="false" data-i18n="remoteModeBtn">远程模式</button>
-                    </div>
                     <button id="btn-merge-all" class="btn btn-success btn-sm hidden" data-i18n="mergeAllBtn">全部合并</button>
                   </div>
                   <div class="list-controls">
@@ -143,11 +139,6 @@
                       <input id="toggle-branches" type="checkbox" />
                       <span data-i18n="showUnlinkedBranches">显示无工作树分支</span>
                     </label>
-                    <label id="remote-hide-merged-wrap" class="checkbox-label hidden">
-                      <input id="toggle-hide-merged-remote" type="checkbox" />
-                      <span data-i18n="hideMergedRemote">隐藏已合并分支</span>
-                    </label>
-                    <button id="btn-fetch-remote" class="btn btn-primary btn-sm hidden" data-i18n="fetchRemoteBtn">拉取远程 (Fetch)</button>
                     <button id="btn-refresh" class="btn btn-secondary btn-sm" data-i18n="refreshList">刷新列表</button>
                   </div>
                 </div>
@@ -157,7 +148,6 @@
                       <tr>
                         <th id="th-branch" data-i18n="colBranchStatus">分支与状态</th>
                         <th id="th-diff" data-i18n="colDiffDefault">与默认分支差异</th>
-                        <th id="th-remote-meta" class="hidden" data-i18n="colRemoteMeta">远端 / 提交者</th>
                         <th class="col-actions" data-i18n="colActions">操作</th>
                       </tr>
                     </thead>
@@ -203,24 +193,17 @@
           <button class="btn-icon" data-close="modal-merge">✕</button>
         </div>
         <div class="modal-body">
-          <div id="merge-source-summary" class="merge-summary muted hidden"></div>
           <div class="field">
             <label for="merge-target" data-i18n="mergeTargetLabel">目标分支</label>
             <select id="merge-target"></select>
           </div>
           <div id="local-merge-options" class="merge-options">
-            <label class="checkbox-label"><input id="merge-auto-push" type="checkbox" /> <span data-i18n-html="remoteMergePushHtml">合并后自动推送目标分支到远程 (<code>git push</code>)</span></label>
+            <label class="checkbox-label"><input id="merge-auto-push" type="checkbox" /> <span data-i18n-html="mergeAutoPushHtml">合并后自动推送目标分支到远程 (<code>git push</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-squash" type="checkbox" /> <span data-i18n-html="mergeNoSquashHtml">保留提交历史 (<code>--no-squash</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-rebase" type="checkbox" /> <span data-i18n-html="mergeNoRebaseHtml">跳过变基 (<code>--no-rebase</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-ff" type="checkbox" /> <span data-i18n-html="mergeNoFfHtml">创建合并提交 (<code>--no-ff</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-remove" type="checkbox" /> <span data-i18n-html="mergeNoRemoveHtml">合并后保留工作树 (<code>--no-remove</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-hooks" type="checkbox" /> <span data-i18n-html="mergeNoHooksHtml">跳过钩子 (<code>--no-hooks</code>)</span></label>
-          </div>
-          <div id="remote-merge-options" class="merge-options hidden">
-            <label class="checkbox-label"><input id="remote-merge-push" type="checkbox" /> <span data-i18n-html="remoteMergePushHtml">合并后自动推送目标分支到远程 (<code>git push</code>)</span></label>
-            <label class="checkbox-label"><input id="remote-merge-no-ff" type="checkbox" /> <span data-i18n-html="remoteMergeNoFfHtml">创建合并提交 (<code>--no-ff</code>)</span></label>
-            <label class="checkbox-label"><input id="remote-merge-squash" type="checkbox" /> <span data-i18n-html="remoteMergeSquashHtml">压缩合并为单个提交 (<code>--squash</code>)</span></label>
-            <label class="checkbox-label"><input id="remote-merge-delete" type="checkbox" /> <span data-i18n-html="remoteMergeDeleteHtml">合并后删除该远程源分支 (<code>git push --delete</code>)</span></label>
           </div>
         </div>
         <div class="modal-footer">

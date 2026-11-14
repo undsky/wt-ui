@@ -9,12 +9,9 @@ import { checkEnvironment, invalidateEnvironmentCache, parseWtJson, runWt } from
 import { autoInstallWorktrunk } from './wt-installer.js';
 import { browsePath, inspectGitRepo, parseCodeWorkspace, pickNativePath } from './workspace.js';
 import {
-  deleteRemoteBranch,
   detectOrStartLocalConflictSession,
   getWorktreeInProgressOp,
   listGitWorktrees,
-  listRemoteBranches,
-  mergeRemoteBranch,
   pullWorktreeBranch,
   pushWorktreeBranch,
 } from './remote.js';
@@ -675,74 +672,6 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         return;
       }
 
-      if (req.method === 'GET' && pathname === '/api/remote/branches') {
-        const projectId = url.searchParams.get('projectId');
-        const fetchRemote = url.searchParams.get('fetch') === '1';
-        const targetBranch = url.searchParams.get('target') || '';
-
-        const store = loadStore();
-        const project = store.projects.find((p) => p.id === (projectId || store.activeProjectId));
-        if (!project) {
-          sendJson(res, 404, { error: '未选择项目' });
-          return;
-        }
-
-        const data = await listRemoteBranches(project.path, {
-          fetch: fetchRemote,
-          targetBranch,
-        });
-        sendJson(res, 200, {
-          ok: true,
-          project,
-          data,
-        });
-        return;
-      }
-
-      if (req.method === 'POST' && pathname === '/api/remote/merge') {
-        const body = await readJsonBody(req);
-        const store = loadStore();
-        const project = store.projects.find((p) => p.id === (body.projectId || store.activeProjectId));
-        if (!project) {
-          sendJson(res, 404, { error: '项目不存在' });
-          return;
-        }
-        if (!body.branch || !String(body.branch).trim()) {
-          sendJson(res, 400, { error: '请指定要合并的远程分支' });
-          return;
-        }
-
-        const result = await mergeRemoteBranch(project.path, {
-          remoteBranch: String(body.branch).trim(),
-          targetBranch: body.target ? String(body.target).trim() : '',
-          squash: Boolean(body.squash),
-          noFf: Boolean(body.noFf),
-          autoPush: body.autoPush !== false,
-          deleteRemote: Boolean(body.deleteRemote),
-        });
-
-        sendJson(res, result.ok ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === 'POST' && pathname === '/api/remote/delete') {
-        const body = await readJsonBody(req);
-        const store = loadStore();
-        const project = store.projects.find((p) => p.id === (body.projectId || store.activeProjectId));
-        if (!project) {
-          sendJson(res, 404, { error: '项目不存在' });
-          return;
-        }
-        if (!body.branch || !String(body.branch).trim()) {
-          sendJson(res, 400, { error: '请指定要删除的远程分支' });
-          return;
-        }
-
-        const result = await deleteRemoteBranch(project.path, String(body.branch).trim());
-        sendJson(res, result.ok ? 200 : 422, result);
-        return;
-      }
-
       if (req.method === 'GET' && pathname === '/api/conflicts/status') {
         const projectId = url.searchParams.get('projectId');
         const requestedWorkDir = url.searchParams.get('workDir') || '';
@@ -820,9 +749,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
         const result = await completeConflictMerge(workDir, {
           sourceBranch: body.sourceBranch,
           targetBranch: body.targetBranch,
-          isRemote: Boolean(body.isRemote),
-          autoPush: body.autoPush !== false,
-          deleteRemote: Boolean(body.deleteRemote),
+          autoPush: Boolean(body.autoPush),
         });
         sendJson(res, result.ok ? 200 : 422, result);
         return;
@@ -855,9 +782,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
             const result = await aiResolveAndCompleteConflictMerge(workDir, {
               sourceBranch: body.sourceBranch,
               targetBranch: body.targetBranch,
-              isRemote: Boolean(body.isRemote),
-              autoPush: body.autoPush !== false,
-              deleteRemote: Boolean(body.deleteRemote),
+              autoPush: Boolean(body.autoPush),
               trackedFiles,
               aiConfig: store.aiConfig,
               onProgress: (ev) => sendEvent(ev),
@@ -889,9 +814,7 @@ export function createAppServer({ wtBin: explicitWtBin } = {}) {
           const result = await aiResolveAndCompleteConflictMerge(workDir, {
             sourceBranch: body.sourceBranch,
             targetBranch: body.targetBranch,
-            isRemote: Boolean(body.isRemote),
-            autoPush: body.autoPush !== false,
-            deleteRemote: Boolean(body.deleteRemote),
+            autoPush: Boolean(body.autoPush),
             trackedFiles,
             aiConfig: store.aiConfig,
           });

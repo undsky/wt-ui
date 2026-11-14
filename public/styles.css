@@ -947,17 +947,6 @@ input[type="checkbox"] {
   box-shadow: var(--shadow-sm);
 }
 
-.merge-summary {
-  font-size: 13px;
-  line-height: 1.45;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--code-bg);
-  border: 1px solid var(--border);
-  font-family: var(--mono);
-  word-break: break-all;
-}
-
 .list-controls {
   display: flex;
   align-items: center;

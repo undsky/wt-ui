@@ -82,9 +82,8 @@ export async function listGitWorktrees(repoPath) {
  * Detect the default branch of a repository (e.g. main or master).
  * @param {string} repoPath
  * @param {string[]} localBranches
- * @param {Array<{ remote: string, name: string }>} remoteBranches
  */
-async function detectDefaultBranch(repoPath, localBranches, remoteBranches) {
+async function detectDefaultBranch(repoPath, localBranches) {
   const symRef = await runGit(repoPath, ['symbolic-ref', 'refs/remotes/origin/HEAD'], { timeout: 5_000 });
   if (symRef.ok) {
     const cleaned = symRef.stdout.trim().replace(/^refs\/remotes\/origin\//, '');
@@ -93,336 +92,13 @@ async function detectDefaultBranch(repoPath, localBranches, remoteBranches) {
 
   for (const candidate of ['main', 'master', 'develop', 'trunk']) {
     if (localBranches.includes(candidate)) return candidate;
-    if (remoteBranches.some((r) => r.name === candidate)) return candidate;
   }
 
   const currentRes = await runGit(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 5_000 });
   const current = currentRes.stdout.trim();
   if (current && current !== 'HEAD') return current;
 
-  return localBranches[0] || remoteBranches[0]?.name || 'main';
-}
-
-/**
- * Parse `git diff --shortstat` output into added and deleted line counts.
- * @param {string} text
- */
-function parseShortStat(text) {
-  if (!text) return { filesChanged: 0, added: 0, deleted: 0 };
-  const filesMatch = text.match(/(\d+)\s+files?\s+changed/i);
-  const addMatch = text.match(/(\d+)\s+insertions?\(\+\)/i);
-  const delMatch = text.match(/(\d+)\s+deletions?\(-\)/i);
-  return {
-    filesChanged: filesMatch ? Number(filesMatch[1]) : 0,
-    added: addMatch ? Number(addMatch[1]) : 0,
-    deleted: delMatch ? Number(delMatch[1]) : 0,
-  };
-}
-
-/**
- * List remote branches (`refs/remotes/*`) and compare each against the target/default branch.
- * @param {string} repoPath
- * @param {{ fetch?: boolean, targetBranch?: string }} [options]
- */
-export async function listRemoteBranches(repoPath, options = {}) {
-  let fetchResult = null;
-  if (options.fetch) {
-    fetchResult = await runGit(repoPath, ['fetch', '--all', '--prune'], { timeout: 45_000 });
-  }
-
-  const [remotesRes, localRefsRes, remoteRefsRes, worktrees] = await Promise.all([
-    runGit(repoPath, ['remote'], { timeout: 5_000 }),
-    runGit(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads'], { timeout: 5_000 }),
-    runGit(
-      repoPath,
-      [
-        'for-each-ref',
-        '--sort=-committerdate',
-        '--format=%(refname:short)\t%(objectname:short)\t%(contents:subject)\t%(authorname)\t%(committerdate:iso8601)',
-        'refs/remotes',
-      ],
-      { timeout: 10_000 }
-    ),
-    listGitWorktrees(repoPath),
-  ]);
-
-  const remotes = remotesRes.stdout
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const localBranches = localRefsRes.stdout
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const rawRemoteEntries = [];
-  for (const line of remoteRefsRes.stdout.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    const [fullRef, shortSha = '', subject = '', author = '', committedAt = ''] = line.split('\t');
-    if (!fullRef || !fullRef.includes('/')) continue;
-    const slashIdx = fullRef.indexOf('/');
-    const remote = fullRef.slice(0, slashIdx);
-    const name = fullRef.slice(slashIdx + 1);
-    if (!name || name === 'HEAD') continue;
-    rawRemoteEntries.push({
-      fullRef,
-      remote,
-      name,
-      shortSha,
-      subject,
-      author,
-      committedAt,
-    });
-  }
-
-  const defaultBranch = await detectDefaultBranch(repoPath, localBranches, rawRemoteEntries);
-  const mainWorktree = worktrees.find((w) => w.isMain) || worktrees[0] || null;
-  const targetBranch = options.targetBranch || mainWorktree?.branch || defaultBranch;
-
-  // Determine the git ref to compare against for targetBranch
-  let compareRef = targetBranch;
-  const checkTargetLocal = await runGit(repoPath, ['rev-parse', '--verify', `refs/heads/${targetBranch}`], {
-    timeout: 4_000,
-  });
-  if (!checkTargetLocal.ok) {
-    const remoteTarget = rawRemoteEntries.find((r) => r.name === targetBranch);
-    if (remoteTarget) compareRef = remoteTarget.fullRef;
-  }
-
-  const items = await Promise.all(
-    rawRemoteEntries.map(async (entry) => {
-      const isDefault = entry.name === defaultBranch;
-      const isTarget = entry.name === targetBranch;
-      const linkedWorktree = worktrees.find((w) => w.branch === entry.name) || null;
-      const hasLocalBranch = localBranches.includes(entry.name);
-
-      let ahead = 0;
-      let behind = 0;
-      let diff = { filesChanged: 0, added: 0, deleted: 0 };
-
-      if (compareRef && entry.fullRef !== compareRef) {
-        const countRes = await runGit(
-          repoPath,
-          ['rev-list', '--left-right', '--count', `${compareRef}...${entry.fullRef}`],
-          { timeout: 6_000 }
-        );
-        if (countRes.ok) {
-          const parts = countRes.stdout.trim().split(/\s+/);
-          if (parts.length >= 2) {
-            behind = Number(parts[0]) || 0;
-            ahead = Number(parts[1]) || 0;
-          }
-        }
-
-        if (ahead > 0) {
-          const statRes = await runGit(
-            repoPath,
-            ['diff', '--shortstat', `${compareRef}...${entry.fullRef}`],
-            { timeout: 6_000 }
-          );
-          if (statRes.ok) {
-            diff = parseShortStat(statRes.stdout);
-          }
-        }
-      }
-
-      return {
-        fullRef: entry.fullRef,
-        remote: entry.remote,
-        branch: entry.name,
-        isDefault,
-        isTarget,
-        hasLocalBranch,
-        worktreePath: linkedWorktree?.path || null,
-        ahead,
-        behind,
-        merged: !isDefault && !isTarget && ahead === 0,
-        diff,
-        head: {
-          short_sha: entry.shortSha,
-          subject: entry.subject,
-          author: entry.author,
-          committed_at: entry.committedAt,
-        },
-      };
-    })
-  );
-
-  return {
-    ok: true,
-    fetched: Boolean(options.fetch),
-    fetchOk: fetchResult ? fetchResult.ok : true,
-    fetchCommand: fetchResult?.command || null,
-    fetchStdout: fetchResult?.stdout || '',
-    fetchStderr: fetchResult?.stderr || '',
-    remotes,
-    defaultBranch,
-    targetBranch,
-    localBranches,
-    items,
-  };
-}
-
-/**
- * Merge a remote branch (e.g. `origin/feat-x`) into a local target branch and optionally push to remote.
- * @param {string} repoPath
- * @param {{
- *   remoteBranch: string,
- *   targetBranch?: string,
- *   squash?: boolean,
- *   noFf?: boolean,
- *   autoPush?: boolean,
- *   deleteRemote?: boolean,
- * }} options
- */
-export async function mergeRemoteBranch(repoPath, options) {
-  const remoteBranch = String(options.remoteBranch || '').trim();
-  if (!remoteBranch) {
-    throw new Error('请指定要合并的远程分支');
-  }
-
-  const slashIdx = remoteBranch.indexOf('/');
-  const remoteName = slashIdx > 0 ? remoteBranch.slice(0, slashIdx) : 'origin';
-  const shortBranch = slashIdx > 0 ? remoteBranch.slice(slashIdx + 1) : remoteBranch;
-  const fullRemoteRef = slashIdx > 0 ? remoteBranch : `${remoteName}/${remoteBranch}`;
-
-  const worktrees = await listGitWorktrees(repoPath);
-  const localRefsRes = await runGit(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
-  const localBranches = localRefsRes.stdout
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const defaultBranch = await detectDefaultBranch(repoPath, localBranches, []);
-  const mainWorktree = worktrees.find((w) => w.isMain) || worktrees[0] || { path: repoPath, branch: defaultBranch };
-  const targetBranch = String(options.targetBranch || mainWorktree.branch || defaultBranch).trim();
-
-  if (shortBranch === targetBranch && fullRemoteRef === `${remoteName}/${targetBranch}`) {
-    // Allow fast-forward / pull of targetBranch from its own remote ref if requested,
-    // or normally merge another remote branch into targetBranch.
-  }
-
-  const steps = [];
-  const recordStep = (res) => {
-    steps.push(res);
-    return res;
-  };
-
-  // Find which worktree has targetBranch checked out; if none, use repoPath and checkout targetBranch.
-  const targetWt = worktrees.find((w) => w.branch === targetBranch);
-  const workDir = targetWt ? targetWt.path : repoPath;
-
-  if (!targetWt) {
-    const hasLocalTarget = localBranches.includes(targetBranch);
-    const checkoutArgs = hasLocalTarget
-      ? ['checkout', targetBranch]
-      : ['checkout', '-b', targetBranch, `${remoteName}/${targetBranch}`];
-    const coRes = recordStep(await runGit(workDir, checkoutArgs, { timeout: 20_000 }));
-    if (!coRes.ok) {
-      return buildMergeResponse(false, steps);
-    }
-  }
-
-  const shouldPush = options.autoPush !== false;
-
-  // Merge the remote ref into targetBranch
-  if (options.squash) {
-    const sqRes = recordStep(await runGit(workDir, ['merge', '--squash', fullRemoteRef], { timeout: 60_000 }));
-    if (!sqRes.ok) {
-      const conflictStatus = await getConflictStatus(workDir);
-      if (conflictStatus.unresolvedCount > 0) {
-        return buildMergeResponse(false, steps, {
-          hasConflicts: true,
-          conflictSession: {
-            workDir,
-            sourceBranch: fullRemoteRef,
-            targetBranch,
-            isRemote: true,
-            autoPush: shouldPush,
-            deleteRemote: Boolean(options.deleteRemote),
-            files: conflictStatus.files,
-            unmergedFiles: conflictStatus.unmergedFiles,
-          },
-        });
-      }
-      await runGit(workDir, ['reset', '--merge'], { timeout: 10_000 });
-      return buildMergeResponse(false, steps);
-    }
-    const statusRes = await runGit(workDir, ['status', '--porcelain'], { timeout: 10_000 });
-    if (statusRes.stdout.trim()) {
-      const commitMsg = `Merge remote-tracking branch '${fullRemoteRef}' into ${targetBranch}`;
-      const commitRes = recordStep(await runGit(workDir, ['commit', '-m', commitMsg], { timeout: 30_000 }));
-      if (!commitRes.ok) {
-        return buildMergeResponse(false, steps);
-      }
-    }
-  } else {
-    const mergeArgs = ['merge'];
-    if (options.noFf) mergeArgs.push('--no-ff');
-    mergeArgs.push('--no-edit', fullRemoteRef);
-    const mergeRes = recordStep(await runGit(workDir, mergeArgs, { timeout: 60_000 }));
-    if (!mergeRes.ok) {
-      const conflictStatus = await getConflictStatus(workDir);
-      if (conflictStatus.unresolvedCount > 0) {
-        return buildMergeResponse(false, steps, {
-          hasConflicts: true,
-          conflictSession: {
-            workDir,
-            sourceBranch: fullRemoteRef,
-            targetBranch,
-            isRemote: true,
-            autoPush: shouldPush,
-            deleteRemote: Boolean(options.deleteRemote),
-            files: conflictStatus.files,
-            unmergedFiles: conflictStatus.unmergedFiles,
-          },
-        });
-      }
-      // Abort non-conflict failed merge so the target worktree stays clean
-      await runGit(workDir, ['merge', '--abort'], { timeout: 10_000 });
-      return buildMergeResponse(false, steps);
-    }
-  }
-
-  // Push target branch to remote if autoPush is enabled (default true)
-  if (shouldPush) {
-    const pushRes = recordStep(await runGit(workDir, ['push', remoteName, targetBranch], { timeout: 60_000 }));
-    if (!pushRes.ok) {
-      return buildMergeResponse(false, steps);
-    }
-  }
-
-  // Optionally delete the merged remote branch
-  if (options.deleteRemote && shortBranch !== targetBranch && shortBranch !== defaultBranch) {
-    const delRes = recordStep(
-      await runGit(workDir, ['push', remoteName, '--delete', shortBranch], { timeout: 45_000 })
-    );
-    if (!delRes.ok) {
-      return buildMergeResponse(false, steps);
-    }
-  }
-
-  return buildMergeResponse(true, steps);
-}
-
-/**
- * Delete a remote branch via `git push <remote> --delete <branch>`.
- * @param {string} repoPath
- * @param {string} remoteBranch
- */
-export async function deleteRemoteBranch(repoPath, remoteBranch) {
-  const ref = String(remoteBranch || '').trim();
-  const slashIdx = ref.indexOf('/');
-  if (slashIdx <= 0) {
-    throw new Error(`无效的远程分支引用: ${ref}`);
-  }
-  const remoteName = ref.slice(0, slashIdx);
-  const shortBranch = ref.slice(slashIdx + 1);
-  if (!shortBranch || shortBranch === 'HEAD') {
-    throw new Error(`不可删除该远程引用: ${ref}`);
-  }
-  return runGit(repoPath, ['push', remoteName, '--delete', shortBranch], { timeout: 45_000 });
+  return localBranches[0] || 'main';
 }
 
 /**
@@ -465,7 +141,7 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
     .split(/\r?\n/)
     .map((s) => s.trim())
     .filter(Boolean);
-  const defaultBranch = await detectDefaultBranch(repoPath, localBranches, []);
+  const defaultBranch = await detectDefaultBranch(repoPath, localBranches);
   const mainWt = worktrees.find((w) => w.isMain) || worktrees[0] || { path: repoPath, branch: defaultBranch };
   const targetBranch = String(options.targetBranch || mainWt.branch || defaultBranch).trim();
   const sourceBranch = String(options.sourceBranch || '').trim();
@@ -480,9 +156,7 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
           workDir: wt.path,
           sourceBranch,
           targetBranch: wt.branch || targetBranch,
-          isRemote: false,
           autoPush: false,
-          deleteRemote: false,
           files: status.files,
           unmergedFiles: status.unmergedFiles,
         },
@@ -507,9 +181,7 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
           workDir: wt.path,
           sourceBranch,
           targetBranch: wt.branch || targetBranch,
-          isRemote: false,
           autoPush: false,
-          deleteRemote: false,
           files: status.files,
           unmergedFiles: status.unmergedFiles,
         },
@@ -538,9 +210,7 @@ export async function detectOrStartLocalConflictSession(repoPath, options) {
         workDir: targetWt.path,
         sourceBranch,
         targetBranch,
-        isRemote: false,
         autoPush: false,
-        deleteRemote: false,
         files: afterStatus.files,
         unmergedFiles: afterStatus.unmergedFiles,
       },
@@ -672,9 +342,7 @@ export async function pullWorktreeBranch(repoPath, options = {}) {
         workDir,
         sourceBranch: sourceBranchLabel,
         targetBranch: currentBranch || 'HEAD',
-        isRemote: false,
         autoPush: false,
-        deleteRemote: false,
         files: conflictStatus.files,
         unmergedFiles: conflictStatus.unmergedFiles,
       },
@@ -731,25 +399,5 @@ export async function pushWorktreeBranch(repoPath, options = {}) {
   }
 
   return runGit(workDir, pushArgs, { timeout: 60_000 });
-}
-
-function buildMergeResponse(ok, steps, extra = {}) {
-  const commands = steps.map((s) => s.command).join(' && ');
-  const stdout = steps
-    .map((s) => (s.stdout || '').trim())
-    .filter(Boolean)
-    .join('\n');
-  const stderr = steps
-    .map((s) => (s.stderr || '').trim())
-    .filter(Boolean)
-    .join('\n');
-  return {
-    ok,
-    command: commands,
-    stdout,
-    stderr,
-    steps,
-    ...extra,
-  };
 }
 

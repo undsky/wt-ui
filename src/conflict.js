@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import { getWorktreeInProgressOp, runGit } from './remote.js';
+import { getWorktreeInProgressOp, pushWorktreeBranch, runGit } from './remote.js';
 
 /**
  * Ensure a relative file path stays strictly inside `workDir`.
@@ -335,9 +335,7 @@ export async function abortConflictMerge(workDir) {
  * @param {{
  *   sourceBranch?: string,
  *   targetBranch?: string,
- *   isRemote?: boolean,
  *   autoPush?: boolean,
- *   deleteRemote?: boolean,
  * }} [options]
  */
 export async function completeConflictMerge(workDir, options = {}) {
@@ -380,31 +378,17 @@ export async function completeConflictMerge(workDir, options = {}) {
     }
   }
 
-  const sourceRef = String(options.sourceBranch || '').trim();
-  const slashIdx = sourceRef.indexOf('/');
-  const remoteName = slashIdx > 0 ? sourceRef.slice(0, slashIdx) : 'origin';
-  const shortBranch = slashIdx > 0 ? sourceRef.slice(slashIdx + 1) : sourceRef;
   let targetBranch = String(options.targetBranch || '').trim();
   if (!targetBranch) {
     const revRes = await runGit(workDir, ['rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 5_000 });
     targetBranch = revRes.stdout.trim();
   }
 
-  const shouldPush = options.isRemote ? options.autoPush !== false : Boolean(options.autoPush);
-  if (shouldPush && targetBranch) {
+  if (options.autoPush && targetBranch) {
     const pushRes = recordStep(
-      await runGit(workDir, ['push', remoteName, targetBranch], { timeout: 60_000 })
+      await pushWorktreeBranch(workDir, { workDir, branch: targetBranch })
     );
     if (!pushRes.ok) {
-      return buildStepsResult(false, steps);
-    }
-  }
-
-  if (options.isRemote && options.deleteRemote && shortBranch && shortBranch !== targetBranch) {
-    const delRes = recordStep(
-      await runGit(workDir, ['push', remoteName, '--delete', shortBranch], { timeout: 45_000 })
-    );
-    if (!delRes.ok) {
       return buildStepsResult(false, steps);
     }
   }
@@ -729,9 +713,7 @@ export async function resolveFileWithAi(fileContent, options) {
  * @param {{
  *   sourceBranch?: string,
  *   targetBranch?: string,
- *   isRemote?: boolean,
  *   autoPush?: boolean,
- *   deleteRemote?: boolean,
  *   trackedFiles?: string[],
  *   aiConfig?: { url: string, key: string, model: string },
  *   onProgress?: (event: Record<string, any>) => void,
@@ -811,9 +793,7 @@ export async function aiResolveAndCompleteConflictMerge(workDir, options = {}) {
   const completeRes = await completeConflictMerge(workDir, {
     sourceBranch: options.sourceBranch,
     targetBranch: options.targetBranch,
-    isRemote: options.isRemote,
     autoPush: options.autoPush,
-    deleteRemote: options.deleteRemote,
   });
 
   const finalStatus = await getConflictStatus(workDir, initialStatus.files.map((f) => f.path));
