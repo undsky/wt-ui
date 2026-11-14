@@ -555,6 +555,19 @@ function renderRowActionsHtml({
   removeBtnCls = '',
   removeLabel = '',
 }) {
+  const toolSlotHtml = `<div class="action-slot action-slot-tool">${openBtnHtml}</div>`;
+
+  let syncSlotHtml = '';
+  if (hasSync) {
+    const pushTitle = remoteAhead > 0 ? t('pushBtnAhead', { ahead: remoteAhead }) : t('pushBtn');
+    syncSlotHtml = `<div class="action-slot action-slot-sync"><div class="action-btn-group" role="group">
+        <button type="button" class="btn-group-item btn-pull-wt" title="${escapeHtml(t('pullBtn'))}">${renderActionIcon('pull')}<span class="btn-label">${escapeHtml(t('pullBtn'))}</span></button>
+        <button type="button" class="btn-group-item ${remoteAhead > 0 ? 'is-accent ' : ''}btn-push-wt" title="${escapeHtml(pushTitle)}">${renderActionIcon('push')}<span class="btn-label">${escapeHtml(t('pushBtn'))}</span>${remoteAhead > 0 ? `<span class="action-count-badge">${remoteAhead}</span>` : ''}</button>
+      </div></div>`;
+  } else {
+    syncSlotHtml = '<div class="action-slot action-slot-sync action-slot-empty" aria-hidden="true"></div>';
+  }
+
   const mergeGroupBtns = [];
   if (hasConflict) {
     mergeGroupBtns.push(
@@ -569,27 +582,18 @@ function renderRowActionsHtml({
 
   const mergeSlotHtml =
     mergeGroupBtns.length > 0
-      ? `<div class="action-slot action-slot-merge"><div class="action-merge-group" role="group">${mergeGroupBtns.join('')}</div><span class="action-divider" aria-hidden="true"></span></div>`
+      ? `<div class="action-slot action-slot-merge"><div class="action-merge-group" role="group">${mergeGroupBtns.join('')}</div></div>`
       : '<div class="action-slot action-slot-merge action-slot-empty" aria-hidden="true"></div>';
 
-  const toolSlotHtml = `<div class="action-slot action-slot-tool">${openBtnHtml}</div>`;
-
-  let syncSlotHtml = '';
-  if (hasSync) {
-    const pushTitle = remoteAhead > 0 ? t('pushBtnAhead', { ahead: remoteAhead }) : t('pushBtn');
-    syncSlotHtml = `<div class="action-slot action-slot-sync"><div class="action-btn-group" role="group">
-        <button type="button" class="btn-group-item btn-pull-wt" title="${escapeHtml(t('pullBtn'))}">${renderActionIcon('pull')}<span class="btn-label">${escapeHtml(t('pullBtn'))}</span></button>
-        <button type="button" class="btn-group-item ${remoteAhead > 0 ? 'is-accent ' : ''}btn-push-wt" title="${escapeHtml(pushTitle)}">${renderActionIcon('push')}<span class="btn-label">${escapeHtml(t('pushBtn'))}</span>${remoteAhead > 0 ? `<span class="action-count-badge">${remoteAhead}</span>` : ''}</button>
-      </div></div>`;
-  } else {
-    syncSlotHtml = '<div class="action-slot action-slot-sync action-slot-empty" aria-hidden="true"></div>';
-  }
-
+  const hasMergeAndRemove = mergeGroupBtns.length > 0 && Boolean(removeBtnCls);
   const dangerSlotHtml = removeBtnCls
-    ? `<div class="action-slot action-slot-danger"><span class="action-divider" aria-hidden="true"></span><button type="button" class="btn-icon-danger ${removeBtnCls}" title="${escapeHtml(removeLabel)}" aria-label="${escapeHtml(removeLabel)}">${renderActionIcon('trash')}</button></div>`
+    ? `<div class="action-slot action-slot-danger">${hasMergeAndRemove ? '<span class="action-divider" aria-hidden="true"></span>' : ''}<button type="button" class="btn-icon-danger ${removeBtnCls}" title="${escapeHtml(removeLabel)}" aria-label="${escapeHtml(removeLabel)}">${renderActionIcon('trash')}</button></div>`
     : '<div class="action-slot action-slot-danger action-slot-empty" aria-hidden="true"></div>';
 
-  return `<div class="actions-cell">${mergeSlotHtml}${toolSlotHtml}${syncSlotHtml}${dangerSlotHtml}</div>`;
+  return {
+    toolSyncHtml: `<div class="actions-cell actions-cell-tool-sync">${toolSlotHtml}${syncSlotHtml}</div>`,
+    manageHtml: `<div class="actions-cell actions-cell-manage">${mergeSlotHtml}${dangerSlotHtml}</div>`,
+  };
 }
 
 function renderWorktrees() {
@@ -608,7 +612,7 @@ function renderWorktrees() {
   }
 
   if (items.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="3" class="muted">${escapeHtml(t('noWorktreeData'))}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" class="muted">${escapeHtml(t('noWorktreeData'))}</td></tr>`;
     return;
   }
 
@@ -667,7 +671,7 @@ function renderWorktrees() {
     const hasSync = Boolean(hasWorktree && wt?.path);
     const canMerge = Boolean(hasWorktree && !isMain && item.branch);
     const canRemove = Boolean(!isMain && (hasWorktree || (!isDefault && item.branch)));
-    const actionsHtml = renderRowActionsHtml({
+    const { toolSyncHtml, manageHtml } = renderRowActionsHtml({
       hasConflict,
       hasSync,
       remoteAhead,
@@ -692,7 +696,8 @@ function renderWorktrees() {
         </div>
       </td>
       <td>${divHtml}</td>
-      <td class="col-actions">${actionsHtml}</td>
+      <td class="col-actions col-tool-sync">${toolSyncHtml}</td>
+      <td class="col-actions col-manage-actions">${manageHtml}</td>
     `;
 
     const resolveBtn = tr.querySelector('.btn-resolve-conflict');

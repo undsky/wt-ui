@@ -992,6 +992,7 @@ input[type="checkbox"] {
 
 .col-actions {
   white-space: nowrap;
+  width: 1%;
 }
 
 .wt-table th.col-actions {
@@ -1005,6 +1006,11 @@ input[type="checkbox"] {
   gap: 5px;
   width: max-content;
   margin-left: auto;
+}
+
+.actions-cell-tool-sync {
+  justify-content: flex-start;
+  margin-left: 0;
 }
 
 .action-slot {
@@ -1201,6 +1207,9 @@ input[type="checkbox"] {
 }
 
 @media (max-width: 900px) {
+  .col-actions {
+    width: auto;
+  }
   .actions-cell {
     width: auto;
     max-width: 100%;
