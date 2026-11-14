@@ -1016,6 +1016,8 @@ input[type="checkbox"] {
   font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .badge-neutral {
@@ -1058,19 +1060,35 @@ input[type="checkbox"] {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.branch-main strong {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .gutter-symbol {
   font-family: var(--mono);
   font-weight: 700;
   color: var(--accent);
+  flex-shrink: 0;
 }
 
 .status-pills {
   display: flex;
+  align-items: center;
   gap: 4px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.diff-stats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 /* Command Log */

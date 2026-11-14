@@ -638,23 +638,32 @@ function renderWorktrees() {
 
     // Divergence
     const db = item.default_branch;
-    const divParts = [];
+    const divStats = [];
+    const divPills = [];
     if (db) {
       if (db.ahead || db.behind) {
-        divParts.push(`<span>↑${db.ahead ?? 0} ↓${db.behind ?? 0}</span>`);
+        divStats.push(`<span>↑${db.ahead ?? 0} ↓${db.behind ?? 0}</span>`);
       }
       if (db.diff && (db.diff.added || db.diff.deleted)) {
-        divParts.push(`<span class="mono">+${db.diff.added} -${db.diff.deleted}</span>`);
+        divStats.push(`<span class="mono">+${db.diff.added} -${db.diff.deleted}</span>`);
       }
       if (db.integration) {
-        divParts.push(`<span class="badge badge-success">${escapeHtml(t('mergedTag', { reason: db.integration.reason }))}</span>`);
+        divPills.push(`<span class="badge badge-success">${escapeHtml(t('mergedTag', { reason: db.integration.reason }))}</span>`);
       }
       if (db.merge_conflicts) {
-        divParts.push(`<span class="badge badge-danger">${escapeHtml(t('mergeConflictRisk'))}</span>`);
+        divPills.push(`<span class="badge badge-danger">${escapeHtml(t('mergeConflictRisk'))}</span>`);
       }
     } else if (isMain || isDefault) {
-      divParts.push(`<span class="muted">${escapeHtml(t('baseBranchTag'))}</span>`);
+      divStats.push(`<span class="muted">${escapeHtml(t('baseBranchTag'))}</span>`);
     }
+
+    const divHtml =
+      divStats.length === 0 && divPills.length === 0
+        ? `<div class="diff-stats"><span class="muted">${escapeHtml(t('noDiff'))}</span></div>`
+        : `<div class="branch-cell">
+            ${divStats.length > 0 ? `<div class="diff-stats">${divStats.join('')}</div>` : ''}
+            ${divPills.length > 0 ? `<div class="status-pills">${divPills.join('')}</div>` : ''}
+          </div>`;
 
     const commitHtml = item.head
       ? `<div><span class="mono">${escapeHtml(item.head.short_sha)}</span> ${escapeHtml(item.head.subject || '')}</div>`
@@ -677,10 +686,10 @@ function renderWorktrees() {
             <span class="gutter-symbol">${gutter}</span>
             <strong>${escapeHtml(branchName)}</strong>
           </div>
-          <div class="status-pills">${pills.join('')}</div>
+          ${pills.length > 0 ? `<div class="status-pills">${pills.join('')}</div>` : ''}
         </div>
       </td>
-      <td><div class="status-pills">${divParts.join(' ') || `<span class="muted">${escapeHtml(t('noDiff'))}</span>`}</div></td>
+      <td>${divHtml}</td>
       <td>${commitHtml}</td>
       <td>${pathHtml}</td>
       <td class="col-actions">
@@ -814,10 +823,10 @@ function renderRemoteBranches() {
             <span class="gutter-symbol">☁</span>
             <strong>${escapeHtml(item.fullRef)}</strong>
           </div>
-          <div class="status-pills">${pills.join('')}</div>
+          ${pills.length > 0 ? `<div class="status-pills">${pills.join('')}</div>` : ''}
         </div>
       </td>
-      <td><div class="status-pills">${divParts.join(' ') || `<span class="muted">${escapeHtml(t('noDiff'))}</span>`}</div></td>
+      <td><div class="diff-stats">${divParts.join('') || `<span class="muted">${escapeHtml(t('noDiff'))}</span>`}</div></td>
       <td>${commitHtml}</td>
       <td><div class="status-pills">${metaParts.join(' ')}</div></td>
       <td class="col-actions">
