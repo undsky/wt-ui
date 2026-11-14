@@ -621,11 +621,37 @@ export async function pullWorktreeBranch(repoPath, options = {}) {
     pullArgs = ['pull', ...reconcileFlag, '--autostash'];
   } else {
     const remoteRes = await runGit(workDir, ['remote'], { timeout: 5_000 });
-    const firstRemote =
-      remoteRes.stdout
-        .split(/\r?\n/)
-        .map((s) => s.trim())
-        .find(Boolean) || 'origin';
+    const firstRemote = remoteRes.stdout
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .find(Boolean);
+    if (!firstRemote) {
+      return {
+        ok: false,
+        hasConflicts: false,
+        command: remoteRes.command,
+        stdout: '',
+        stderr: '当前仓库未配置任何远程仓库 (remote)，无法拉取。',
+        conflictSession: null,
+      };
+    }
+    if (currentBranch) {
+      const lsRes = await runGit(
+        workDir,
+        ['ls-remote', '--heads', firstRemote, `refs/heads/${currentBranch}`],
+        { timeout: 10_000 }
+      );
+      if (lsRes.ok && !lsRes.stdout.trim()) {
+        return {
+          ok: false,
+          hasConflicts: false,
+          command: lsRes.command,
+          stdout: '',
+          stderr: `远程分支 ${firstRemote}/${currentBranch} 不存在（该本地分支尚未推送到远端），请先点击「推送」创建远程分支。`,
+          conflictSession: null,
+        };
+      }
+    }
     sourceBranchLabel = currentBranch ? `${firstRemote}/${currentBranch}` : firstRemote;
     pullArgs = currentBranch
       ? ['pull', ...reconcileFlag, '--autostash', firstRemote, currentBranch]

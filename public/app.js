@@ -315,9 +315,9 @@ function renderToolSelects() {
 function updateCommandPreview() {
   const previewEl = $('cmd-preview');
   if (!previewEl) return;
-  const branch = $('input-branch').value.trim() || 'feat-auth';
-  const base = $('input-base').value.trim();
-  const create = $('input-create').checked;
+  const base = $('input-base')?.value.trim() || '';
+  const branch = generateRandomBranchName(base);
+  const create = true;
   const toolId = $('select-tool').value;
   const tool = getToolById(toolId);
 
@@ -462,17 +462,6 @@ function getMainWorktreeBranch(worktreeData) {
   return mainItem?.branch || worktreeData?.repo?.default_branch || 'main';
 }
 
-function applyAutoBranchName(baseBranch, force = false) {
-  const branchInput = $('input-branch');
-  if (!branchInput) return;
-  const prevAuto = branchInput.dataset.autoValue || '';
-  if (force || !branchInput.value.trim() || branchInput.value.trim() === prevAuto) {
-    const generated = generateRandomBranchName(baseBranch);
-    branchInput.value = generated;
-    branchInput.dataset.autoValue = generated;
-  }
-}
-
 function applyDefaultBranchToBaseInput(baseBranch, force = false) {
   const baseSelect = $('input-base');
   if (!baseSelect) return;
@@ -532,7 +521,6 @@ function renderMainProject() {
 
   const baseBranch = getMainWorktreeBranch(state.worktreeData);
   applyDefaultBranchToBaseInput(baseBranch, true);
-  applyAutoBranchName(baseBranch, true);
 
   renderToolSelects();
 }
@@ -616,7 +604,6 @@ function renderWorktrees() {
   const defaultBranch = state.worktreeData?.repo?.default_branch || 'main';
   const mainBranch = getMainWorktreeBranch(state.worktreeData);
   applyDefaultBranchToBaseInput(mainBranch, false);
-  applyAutoBranchName($('input-base').value.trim() || mainBranch, false);
   updateCommandPreview();
   $('wt-count').textContent = String(items.length);
   const mergeAllBtn = $('btn-merge-all');
@@ -3206,19 +3193,11 @@ function bindEvents() {
     }
   });
 
-  $('input-branch').addEventListener('input', updateCommandPreview);
-  $('input-create').addEventListener('change', updateCommandPreview);
   $('select-tool').addEventListener('change', () => {
     updateCommandPreview();
   });
 
-  $('btn-random-branch').addEventListener('click', () => {
-    applyAutoBranchName($('input-base').value.trim(), true);
-    updateCommandPreview();
-  });
-
   $('input-base').addEventListener('change', () => {
-    applyAutoBranchName($('input-base').value.trim(), false);
     updateCommandPreview();
   });
 
@@ -3229,13 +3208,14 @@ function bindEvents() {
     const btn = $('btn-switch-submit');
     btn.disabled = true;
     try {
-      const targetBranch = $('input-branch').value.trim();
+      const baseBranch = $('input-base').value.trim();
+      const targetBranch = generateRandomBranchName(baseBranch);
       const selectedToolId = $('select-tool').value;
       const res = await switchWorktreeWithClobberPrompt({
         projectId: active.id,
         branch: targetBranch,
-        create: $('input-create').checked,
-        base: $('input-base').value.trim(),
+        create: true,
+        base: baseBranch,
         toolId: selectedToolId,
       });
       if (res.worktreeTools) {
@@ -3245,7 +3225,6 @@ function bindEvents() {
       }
       appendLog(t('logExec', { cmd: res.command }), res.stdout || res.stderr || t('worktreePathLog', { path: res.worktreePath }));
       showToast(t('worktreeReadyToast'), 'success');
-      applyAutoBranchName($('input-base').value.trim(), true);
       updateCommandPreview();
       await refreshWorktrees();
     } catch (err) {

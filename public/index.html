@@ -98,15 +98,6 @@
                 <form id="switch-form" class="switch-form">
                   <div class="form-row">
                     <div class="field field-grow">
-                      <label for="input-branch" data-i18n="branchNameLabel">分支名称</label>
-                      <div class="input-with-btn">
-                        <input id="input-branch" type="text" data-i18n-placeholder="branchPlaceholder" placeholder="例如 main_20261113102530" required />
-                        <button type="button" id="btn-random-branch" class="btn btn-secondary btn-sm" data-i18n="generateBtn" data-i18n-title="generateBtnTitle" title="根据基于分支和当前时间戳重新生成">生成</button>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="form-row">
-                    <div class="field field-grow">
                       <label for="input-base" data-i18n="baseBranchLabel">基于分支 (--base)</label>
                       <select id="input-base"></select>
                     </div>
@@ -116,10 +107,6 @@
                     </div>
                   </div>
                   <div class="form-row form-row-bottom">
-                    <label class="checkbox-label">
-                      <input id="input-create" type="checkbox" checked />
-                      <span data-i18n-html="createNewBranchHtml">创建新分支 (<code>-c</code>)</span>
-                    </label>
                     <button type="submit" id="btn-switch-submit" class="btn btn-primary" data-i18n="createAndOpen">
                       创建并打开
                     </button>
