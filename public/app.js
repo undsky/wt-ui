@@ -1180,15 +1180,15 @@ function populateMergeTargetSelect(sourceBranch) {
 function openMergeModal(branch) {
   state.mergeTargetBranch = branch || null;
   populateMergeTargetSelect(branch || '');
-  for (const id of [
-    'merge-auto-push',
-    'merge-no-squash',
-    'merge-no-rebase',
-    'merge-no-ff',
-    'merge-no-remove',
-    'merge-no-hooks',
-  ]) {
-    if ($(id)) $(id).checked = false;
+  const defaultChecked = {
+    'merge-auto-push': true,
+    'merge-no-squash': false,
+    'merge-no-ff': false,
+    'merge-no-remove': true,
+    'merge-no-hooks': false,
+  };
+  for (const [id, checked] of Object.entries(defaultChecked)) {
+    if ($(id)) $(id).checked = checked;
   }
   openModal('modal-merge');
 }
@@ -1205,11 +1205,10 @@ async function confirmMerge() {
     branch: state.mergeTargetBranch,
     target,
     autoPush,
-    noSquash: $('merge-no-squash').checked,
-    noRebase: $('merge-no-rebase').checked,
-    noFf: $('merge-no-ff').checked,
-    noRemove: $('merge-no-remove').checked,
-    noHooks: $('merge-no-hooks').checked,
+    noSquash: Boolean($('merge-no-squash')?.checked),
+    noFf: Boolean($('merge-no-ff')?.checked),
+    noRemove: Boolean($('merge-no-remove')?.checked),
+    noHooks: Boolean($('merge-no-hooks')?.checked),
   };
 
   btn.disabled = true;

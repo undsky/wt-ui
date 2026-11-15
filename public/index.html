@@ -200,15 +200,13 @@
         </div>
         <div class="modal-body">
           <div class="field">
-            <label for="merge-target" data-i18n="mergeTargetLabel">目标分支</label>
             <select id="merge-target"></select>
           </div>
           <div id="local-merge-options" class="merge-options">
-            <label class="checkbox-label"><input id="merge-auto-push" type="checkbox" /> <span data-i18n-html="mergeAutoPushHtml">合并后自动推送目标分支到远程 (<code>git push</code>)</span></label>
+            <label class="checkbox-label"><input id="merge-auto-push" type="checkbox" checked /> <span data-i18n-html="mergeAutoPushHtml">合并后自动推送目标分支到远程 (<code>git push</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-squash" type="checkbox" /> <span data-i18n-html="mergeNoSquashHtml">保留提交历史 (<code>--no-squash</code>)</span></label>
-            <label class="checkbox-label"><input id="merge-no-rebase" type="checkbox" /> <span data-i18n-html="mergeNoRebaseHtml">跳过变基 (<code>--no-rebase</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-ff" type="checkbox" /> <span data-i18n-html="mergeNoFfHtml">创建合并提交 (<code>--no-ff</code>)</span></label>
-            <label class="checkbox-label"><input id="merge-no-remove" type="checkbox" /> <span data-i18n-html="mergeNoRemoveHtml">合并后保留工作树 (<code>--no-remove</code>)</span></label>
+            <label class="checkbox-label"><input id="merge-no-remove" type="checkbox" checked /> <span data-i18n-html="mergeNoRemoveHtml">合并后保留工作树 (<code>--no-remove</code>)</span></label>
             <label class="checkbox-label"><input id="merge-no-hooks" type="checkbox" /> <span data-i18n-html="mergeNoHooksHtml">跳过钩子 (<code>--no-hooks</code>)</span></label>
           </div>
         </div>
