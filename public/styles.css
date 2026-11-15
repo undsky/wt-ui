@@ -860,13 +860,27 @@ input[type="checkbox"] {
   flex-wrap: wrap;
 }
 
+.list-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 100%;
+}
+
+.list-card > .card-header {
+  flex-shrink: 0;
+}
+
 .table-wrap {
-  overflow-x: auto;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .wt-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
 }
 
 .wt-table th,
@@ -882,6 +896,14 @@ input[type="checkbox"] {
   color: var(--muted);
   font-weight: 600;
   white-space: nowrap;
+}
+
+.wt-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface);
+  transition: background-color 0.2s ease, border-color 0.2s ease;
 }
 
 .wt-table tbody tr {
@@ -2314,6 +2336,22 @@ input[type="checkbox"] {
     height: 100vh;
     overflow: hidden;
   }
+
+  .workspace-layout {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .project-split {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .project-left {
+    overflow-y: auto;
+  }
+
+  .project-right {
+    overflow: hidden;
+  }
 }
 
 .project-split {
@@ -2339,10 +2377,6 @@ input[type="checkbox"] {
   gap: 16px;
 }
 
-.project-right {
-  overflow-y: auto;
-}
-
 .log-card {
   flex: 1;
   min-height: 180px;
@@ -2357,6 +2391,10 @@ input[type="checkbox"] {
 @media (max-width: 1200px) {
   .project-split {
     grid-template-columns: 1fr;
+  }
+
+  .list-card {
+    max-height: max(320px, calc(100vh - 96px));
   }
 }
 
