@@ -3,7 +3,7 @@ const LANG_STORAGE_KEY = 'wt-ui-lang';
 export const MESSAGES = {
   zh: {
     pageTitle: 'wt-ui — Worktrunk 可视化工作树平台',
-    brandSub: 'Worktrunk 可视化操作平台',
+    brandSub: 'Git Worktree 可视化操作平台',
     envChecking: '检查环境中...',
     manageTools: '设置',
     viewInstallGuide: '查看安装引导',

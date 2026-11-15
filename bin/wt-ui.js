@@ -13,7 +13,7 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const pkg = JSON.parse(readFileSync(resolve(__dirname, '..', 'package.json'), 'utf8'));
 
 function printHelp() {
-  console.log(`wt-ui v${pkg.version} — Worktrunk 可视化操作平台
+  console.log(`wt-ui v${pkg.version} — Git Worktree 可视化操作平台
 
 用法:
   wt-ui start [path] [options]   启动 Web 可视化平台并打开浏览器
