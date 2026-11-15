@@ -92,6 +92,18 @@
                 <form id="switch-form" class="switch-form">
                   <div class="form-row">
                     <div class="field field-grow">
+                      <label for="input-branch" data-i18n="branchNameLabel">分支名称</label>
+                      <input
+                        id="input-branch"
+                        type="text"
+                        data-i18n-placeholder="branchPlaceholder"
+                        placeholder="留空则自动生成"
+                        autocomplete="off"
+                      />
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="field field-grow">
                       <label for="input-base" data-i18n="baseBranchLabel">基于分支 (--base)</label>
                       <select id="input-base"></select>
                     </div>
@@ -126,7 +138,6 @@
                   <div class="list-title-group">
                     <h2 id="list-card-title" data-i18n="worktreeListTitle">工作树列表</h2>
                     <span id="wt-count" class="badge badge-neutral">0</span>
-                    <button id="btn-merge-all" class="btn btn-success btn-sm hidden" data-i18n="mergeAllBtn">全部合并</button>
                   </div>
                   <div class="list-controls">
                     <label id="local-branches-toggle-wrap" class="checkbox-label">
@@ -184,7 +195,7 @@
       <div class="modal-backdrop" data-close="modal-merge"></div>
       <div class="modal-dialog">
         <div class="modal-header">
-          <h3 id="modal-merge-title" data-i18n="mergeModalTitle">合并分支</h3>
+          <h3 data-i18n="mergeModalTitle">合并分支</h3>
           <button class="btn-icon" data-close="modal-merge">✕</button>
         </div>
         <div class="modal-body">

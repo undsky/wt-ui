@@ -69,6 +69,18 @@ const MIME_TYPES = {
   '.woff2': 'font/woff2',
 };
 
+export function isValidBranchName(name) {
+  if (typeof name !== 'string') return false;
+  if (!name || name.length > 255) return false;
+  if (name === '@' || name.startsWith('-') || name.startsWith('/') || name.endsWith('/') || name.endsWith('.')) {
+    return false;
+  }
+  if (/[\s\x00-\x1f\x7f~^:?*[\\]/.test(name)) return false;
+  if (name.includes('..') || name.includes('//') || name.includes('@{')) return false;
+  const segments = name.split('/');
+  return segments.every((seg) => seg.length > 0 && !seg.startsWith('.') && !seg.endsWith('.lock'));
+}
+
 function sendJson(res, statusCode, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(statusCode, {
@@ -571,13 +583,22 @@ export function createAppServer({ wtBin: explicitWtBin, noAutoInstall = false } 
           sendJson(res, 400, { error: '请填写分支名称' });
           return;
         }
+        const branch = String(body.branch).trim();
+        if (!isValidBranchName(branch)) {
+          sendJson(res, 400, { error: '分支名称格式无效' });
+          return;
+        }
+        const base = body.base ? String(body.base).trim() : '';
+        if (base && !isValidBranchName(base)) {
+          sendJson(res, 400, { error: '基于分支名称格式无效' });
+          return;
+        }
         const env = await checkEnvironment({ wtBin: explicitWtBin });
         if (!env.wtBin) {
           sendJson(res, 503, { error: env.issues.join(' '), env });
           return;
         }
 
-        const branch = String(body.branch).trim();
         const create = Boolean(body.create);
         const noHooks = Boolean(body.noHooks);
         const approvalGate = await resolveApprovalGate({
@@ -605,7 +626,7 @@ export function createAppServer({ wtBin: explicitWtBin, noAutoInstall = false } 
           branch,
           create,
           clobber: Boolean(body.clobber),
-          base: body.base ? String(body.base).trim() : '',
+          base,
           tool,
           prompt: body.prompt ? String(body.prompt).trim() : '',
           preferredTerminal: store.generalConfig?.preferredTerminal || '',

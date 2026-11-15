@@ -21,7 +21,6 @@ const state = {
   browseCurrentPath: '',
   browseParentPath: null,
   mergeTargetBranch: null,
-  mergeAllMode: false,
   conflictSession: null,
 };
 
@@ -652,10 +651,6 @@ function renderWorktrees() {
   const mainBranch = getMainWorktreeBranch(state.worktreeData);
   applyDefaultBranchToBaseInput(mainBranch, false);
   $('wt-count').textContent = String(items.length);
-  const mergeAllBtn = $('btn-merge-all');
-  if (mergeAllBtn) {
-    mergeAllBtn.classList.toggle('hidden', getMergeableWorktreeBranches().length === 0);
-  }
 
   if (items.length === 0) {
     tbody.innerHTML = `<tr><td colspan="4" class="muted">${escapeHtml(t('noWorktreeData'))}</td></tr>`;
@@ -875,12 +870,16 @@ async function refreshWorktrees() {
 }
 
 async function selectProject(projectId) {
+  const prevProjectId = state.activeProjectId;
   if (!state.openTabIds.includes(projectId)) {
     state.openTabIds.push(projectId);
     saveOpenTabs();
   }
   state.activeProjectId = projectId;
   state.worktreeData = state.worktreeCache[projectId] || null;
+  if (prevProjectId !== projectId && $('input-branch')) {
+    $('input-branch').value = '';
+  }
   renderSidebar();
   renderMainProject();
   renderWorktrees();
@@ -1178,34 +1177,8 @@ function populateMergeTargetSelect(sourceBranch) {
   }
 }
 
-function getMergeableWorktreeBranches(targetBranch = '') {
-  const items = state.worktreeData?.items || [];
-  const defaultBranch = state.worktreeData?.repo?.default_branch || 'main';
-  const targetIsDefault = !targetBranch || targetBranch === defaultBranch;
-  return items
-    .filter((item) => {
-      const wt = item.worktree;
-      if (!wt || wt.main || !item.branch || item.branch === targetBranch) return false;
-      if (wt.locked || wt.prunable || wt.changes?.conflicted || wt.operation) return false;
-      const db = item.default_branch;
-      if (db?.orphan) return false;
-      if (targetIsDefault && db) {
-        const ch = wt.changes || {};
-        const hasDirty = Boolean(ch.staged || ch.modified || ch.untracked || ch.renamed || ch.deleted);
-        if (!hasDirty && (db.ahead === 0 || (db.integration && !db.ahead))) {
-          return false;
-        }
-      }
-      return true;
-    })
-    .map((item) => item.branch);
-}
-
-function openMergeDialog({ mergeAll, branch, titleKey }) {
-  state.mergeAllMode = mergeAll;
+function openMergeModal(branch) {
   state.mergeTargetBranch = branch || null;
-  const titleEl = $('modal-merge-title');
-  if (titleEl) titleEl.textContent = t(titleKey);
   populateMergeTargetSelect(branch || '');
   for (const id of [
     'merge-auto-push',
@@ -1220,28 +1193,16 @@ function openMergeDialog({ mergeAll, branch, titleKey }) {
   openModal('modal-merge');
 }
 
-function openMergeModal(branch) {
-  openMergeDialog({ mergeAll: false, branch, titleKey: 'mergeModalTitle' });
-}
-
-function openMergeAllModal() {
-  if (getMergeableWorktreeBranches().length === 0) {
-    showToast(t('noMergeableBranchesToast'), 'info');
-    return;
-  }
-  openMergeDialog({ mergeAll: true, branch: null, titleKey: 'mergeAllModalTitle' });
-}
-
 async function confirmMerge() {
   const active = getActiveProject();
-  if (!active || (!state.mergeAllMode && !state.mergeTargetBranch)) return;
+  if (!active || !state.mergeTargetBranch) return;
   const btn = $('btn-confirm-merge');
-  const origLabel = btn.textContent;
   const target = $('merge-target').value.trim();
 
   const autoPush = Boolean($('merge-auto-push')?.checked);
-  const commonOptions = {
+  const payload = {
     projectId: active.id,
+    branch: state.mergeTargetBranch,
     target,
     autoPush,
     noSquash: $('merge-no-squash').checked,
@@ -1251,95 +1212,33 @@ async function confirmMerge() {
     noHooks: $('merge-no-hooks').checked,
   };
 
-  if (!state.mergeAllMode) {
-    btn.disabled = true;
-    try {
-      const res = await apiWithHookApproval('/api/worktrees/merge', {
-        ...commonOptions,
-        branch: state.mergeTargetBranch,
-      });
-      appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
-      showToast(t('mergeSuccessToast', { branch: state.mergeTargetBranch }), 'success');
+  btn.disabled = true;
+  try {
+    const res = await apiWithHookApproval('/api/worktrees/merge', payload);
+    appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
+    showToast(t('mergeSuccessToast', { branch: state.mergeTargetBranch }), 'success');
+    closeModal('modal-merge');
+    await refreshWorktrees();
+  } catch (err) {
+    if (err.approvalCancelled) {
+      showToast(err.message, 'info');
+      return;
+    }
+    appendLog(t('mergeFailLog', { cmd: err.payload?.command || '' }), err.payload?.stderr || err.message);
+    if (err.payload?.hasConflicts && err.payload?.conflictSession) {
+      closeModal('modal-merge');
+      showToast(t('conflictDetectedToast'), 'info');
+      await openConflictModal(err.payload.conflictSession);
+      await refreshWorktrees();
+    } else if (err.payload?.pushFailed) {
       closeModal('modal-merge');
       await refreshWorktrees();
-    } catch (err) {
-      if (err.approvalCancelled) {
-        showToast(err.message, 'info');
-        return;
-      }
-      appendLog(t('mergeFailLog', { cmd: err.payload?.command || '' }), err.payload?.stderr || err.message);
-      if (err.payload?.hasConflicts && err.payload?.conflictSession) {
-        closeModal('modal-merge');
-        showToast(t('conflictDetectedToast'), 'info');
-        await openConflictModal(err.payload.conflictSession);
-        await refreshWorktrees();
-      } else if (err.payload?.pushFailed) {
-        closeModal('modal-merge');
-        await refreshWorktrees();
-        await handleAutoPushFailure(err.payload.pushFailed, err.payload?.stderr || err.message);
-      } else {
-        showToast(t('mergeFailToast', { msg: err.payload?.stderr || err.message }), 'error');
-      }
-    } finally {
-      btn.disabled = false;
+      await handleAutoPushFailure(err.payload.pushFailed, err.payload?.stderr || err.message);
+    } else {
+      showToast(t('mergeFailToast', { msg: err.payload?.stderr || err.message }), 'error');
     }
-    return;
-  }
-
-  const branches = getMergeableWorktreeBranches(target);
-  if (branches.length === 0) {
-    showToast(t('noMergeableBranchesToast'), 'info');
-    closeModal('modal-merge');
-    return;
-  }
-
-  btn.disabled = true;
-  let done = 0;
-  let batchApproveHooks = false;
-  try {
-    for (let i = 0; i < branches.length; i += 1) {
-      const branch = branches[i];
-      const isLast = i === branches.length - 1;
-      btn.textContent = t('mergingProgressBtn', { done: done + 1, total: branches.length });
-      try {
-        const res = await apiWithHookApproval('/api/worktrees/merge', {
-          ...commonOptions,
-          branch,
-          approveHooks: batchApproveHooks,
-          autoPush: autoPush && isLast,
-        });
-        if (res.hookApproved) batchApproveHooks = true;
-        done += 1;
-        appendLog(t('mergeSuccessLog', { cmd: res.command }), res.stdout || res.stderr);
-      } catch (err) {
-        if (err.approvalCancelled) {
-          showToast(err.message, 'info');
-          return;
-        }
-        const msg = err.payload?.stderr || err.message;
-        appendLog(t('mergeFailLog', { cmd: err.payload?.command || branch }), msg);
-        if (err.payload?.hasConflicts && err.payload?.conflictSession) {
-          closeModal('modal-merge');
-          showToast(t('conflictDetectedToast'), 'info');
-          await openConflictModal(err.payload.conflictSession);
-          await refreshWorktrees();
-        } else if (err.payload?.pushFailed) {
-          closeModal('modal-merge');
-          await refreshWorktrees();
-          await handleAutoPushFailure(err.payload.pushFailed, msg);
-        } else {
-          showToast(t('mergeAllPartialFailToast', { done, total: branches.length, branch, msg }), 'error');
-          await refreshWorktrees();
-        }
-        return;
-      }
-    }
-    closeModal('modal-merge');
-    showToast(t('mergeAllSuccessToast', { count: done, target: target || getMainWorktreeBranch(state.worktreeData) }), 'success');
-    await refreshWorktrees();
   } finally {
     btn.disabled = false;
-    btn.textContent = origLabel;
   }
 }
 
@@ -3128,7 +3027,6 @@ function bindEvents() {
   $('btn-pick-workspace').addEventListener('click', () => pickNative('workspace'));
 
   $('btn-refresh').addEventListener('click', refreshWorktrees);
-  $('btn-merge-all').addEventListener('click', openMergeAllModal);
   $('toggle-branches').addEventListener('change', refreshWorktrees);
 
   $('switch-form').addEventListener('submit', async (e) => {
@@ -3139,7 +3037,9 @@ function bindEvents() {
     btn.disabled = true;
     try {
       const baseBranch = $('input-base').value.trim();
-      const targetBranch = generateRandomBranchName(baseBranch);
+      const branchInput = $('input-branch');
+      const customBranch = branchInput ? branchInput.value.trim() : '';
+      const targetBranch = customBranch || generateRandomBranchName(baseBranch);
       const selectedToolId = $('select-tool').value;
       const res = await switchWorktreeWithClobberPrompt({
         projectId: active.id,
@@ -3153,6 +3053,7 @@ function bindEvents() {
       } else if (targetBranch && selectedToolId) {
         active.worktreeTools = { ...(active.worktreeTools || {}), [targetBranch]: selectedToolId };
       }
+      if (branchInput) branchInput.value = '';
       appendLog(t('logExec', { cmd: res.command }), res.stdout || res.stderr || t('worktreePathLog', { path: res.worktreePath }));
       showToast(t('worktreeReadyToast'), 'success');
       await refreshWorktrees();
