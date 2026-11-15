@@ -557,27 +557,23 @@
       <div id="modal-push-rejected-backdrop" class="modal-backdrop"></div>
       <div class="modal-dialog">
         <div class="modal-header">
-          <h3 id="modal-push-rejected-title" data-i18n="pushRejectedTitle">推送被拒绝 (non-fast-forward)</h3>
+          <h3 id="modal-push-rejected-title" data-i18n="pushRejectedTitle">推送被拒绝</h3>
           <button type="button" id="btn-push-rejected-close" class="btn-icon" data-i18n-aria="closeBtn" aria-label="关闭">✕</button>
         </div>
         <div class="modal-body">
-          <div id="push-rejected-branch-row" class="push-rejected-target hidden">
-            <span data-i18n="pushRejectedBranchLabel">分支：</span>
-            <code id="push-rejected-branch" class="mono"></code>
-          </div>
           <p id="modal-push-rejected-message" class="confirm-message"></p>
           <div class="push-rejected-options">
             <div class="push-rejected-option-item" data-i18n-html="pushRejectedPullOptionHtml">
               <strong>拉取并推送</strong>：先执行 <code>git pull</code> 合并远端提交后再推送（若产生冲突将打开冲突解决器）。
             </div>
             <div class="push-rejected-option-item" data-i18n-html="pushRejectedForceOptionHtml">
-              <strong>安全强推 (<code>--force-with-lease</code>)</strong>：适用于本地已变基或重写提交历史，用本地分支覆盖远端（若远端存在未拉取的新提交会被安全拦截）。
+              <strong>安全强推</strong>：适用于本地已变基或重写提交历史，用本地分支覆盖远端（若远端存在未拉取的新提交会被安全拦截）。
             </div>
           </div>
         </div>
         <div class="modal-footer">
           <button type="button" id="btn-push-rejected-cancel" class="btn btn-ghost" data-i18n="cancelBtn">取消</button>
-          <button type="button" id="btn-push-rejected-force" class="btn btn-warning" data-i18n="pushForceLeaseBtn">安全强推 (--force-with-lease)</button>
+          <button type="button" id="btn-push-rejected-force" class="btn btn-warning" data-i18n="pushForceLeaseBtn">安全强推</button>
           <button type="button" id="btn-push-rejected-pull" class="btn btn-primary" data-i18n="pushPullAndRetryBtn">拉取并推送</button>
         </div>
       </div>

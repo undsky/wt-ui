@@ -151,26 +151,16 @@ function settlePushRejected(choice) {
   if (resolver) resolver(choice || 'cancel');
 }
 
-function showPushRejectedDialog({ branch = '' } = {}) {
+function showPushRejectedDialog() {
   if (pushRejectedResolver) {
     settlePushRejected('cancel');
   }
-  const branchRow = $('push-rejected-branch-row');
-  const branchEl = $('push-rejected-branch');
   const msgEl = $('modal-push-rejected-message');
   const pullBtn = $('btn-push-rejected-pull');
   if (!msgEl || !pullBtn) {
     return Promise.resolve('cancel');
   }
 
-  if (branchRow && branchEl) {
-    if (branch) {
-      branchEl.textContent = branch;
-      branchRow.classList.remove('hidden');
-    } else {
-      branchRow.classList.add('hidden');
-    }
-  }
   msgEl.textContent = t('pushRejectedMessage');
   openModal('modal-push-rejected');
   pullBtn.focus();
@@ -1041,7 +1031,7 @@ async function handlePushNonFastForward({ workDir, branch } = {}) {
   const active = getActiveProject();
   if (!active || !workDir) return false;
 
-  const choice = await showPushRejectedDialog({ branch });
+  const choice = await showPushRejectedDialog();
   if (choice === 'cancel') return false;
 
   if (choice === 'force') {
