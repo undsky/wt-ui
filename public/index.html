@@ -80,17 +80,11 @@
               </button>
             </div>
           </div>
-          <div id="project-tree" class="project-tree">
-            <div class="empty-hint" data-i18n="emptySidebarHint">点击上方「添加」选择项目文件夹或 .code-workspace 文件</div>
-          </div>
+          <div id="project-tree" class="project-tree"></div>
         </aside>
 
         <main class="main-panel">
           <div id="project-tabs" class="project-tabs hidden" role="tablist" data-i18n-aria="openTabsLabel" aria-label="已打开的项目"></div>
-
-          <div id="no-project-state" class="empty-state">
-            <button id="btn-empty-add" class="btn btn-primary" data-i18n="chooseProjectOrWs">选择项目或工作区</button>
-          </div>
 
           <div id="project-view" class="project-split hidden">
             <div class="project-left">
@@ -172,13 +166,13 @@
         </div>
         <div class="modal-body">
           <div class="browser-path-bar">
-            <button id="btn-browse-up" class="btn btn-secondary btn-sm" data-i18n="parentDirBtn">上级目录</button>
+            <button id="btn-browse-up" class="btn btn-secondary btn-sm" data-i18n="parentDirBtn">上级</button>
             <input id="input-browse-path" type="text" data-i18n-placeholder="browsePathPlaceholder" placeholder="输入目录路径后按回车跳转，或点击下方选择" />
-            <button id="btn-add-direct" class="btn btn-primary btn-sm" data-i18n="addCurrentPathBtn">添加当前路径</button>
+            <button id="btn-add-direct" class="btn btn-primary btn-sm" data-i18n="addCurrentPathBtn">添加</button>
           </div>
           <div class="browser-native-bar">
-            <button id="btn-pick-folder" class="btn btn-secondary btn-sm" data-i18n="pickFolderBtn">选择本地文件夹...</button>
-            <button id="btn-pick-workspace" class="btn btn-secondary btn-sm" data-i18n="pickWorkspaceBtn">选择 .code-workspace 文件...</button>
+            <button id="btn-pick-folder" class="btn btn-secondary btn-sm" data-i18n="pickFolderBtn">选择文件夹</button>
+            <button id="btn-pick-workspace" class="btn btn-secondary btn-sm" data-i18n="pickWorkspaceBtn">选择工作区 (.code-workspace)</button>
           </div>
           <div id="browser-list" class="browser-list"></div>
         </div>

@@ -392,12 +392,14 @@ async function apiWithHookApproval(path, payload) {
   }
 }
 
-function renderSidebar() {
+function renderSidebar({ autoOpenAdd = false } = {}) {
   const tree = $('project-tree');
   tree.innerHTML = '';
 
   if (state.projects.length === 0) {
-    tree.innerHTML = `<div class="empty-hint">${escapeHtml(t('emptySidebarHint'))}</div>`;
+    if (autoOpenAdd) {
+      openAddTargetModal();
+    }
     return;
   }
 
@@ -563,12 +565,10 @@ function renderMainProject() {
   renderTabs();
   const active = getActiveProject();
   if (!active || !state.openTabIds.includes(active.id)) {
-    $('no-project-state').classList.remove('hidden');
     $('project-view').classList.add('hidden');
     return;
   }
 
-  $('no-project-state').classList.add('hidden');
   $('project-view').classList.remove('hidden');
 
   const baseBranch = getMainWorktreeBranch(state.worktreeData);
@@ -823,7 +823,7 @@ async function loadHealth(autoOpenGuide = false) {
   renderEnv(autoOpenGuide);
 }
 
-async function loadState() {
+async function loadState({ autoOpenAdd = false } = {}) {
   const data = await api('/api/state');
   state.appVersion = data.appVersion || state.appVersion || '0.1.0';
   state.workspaces = data.workspaces;
@@ -853,7 +853,7 @@ async function loadState() {
   state.openTabIds = savedTabs;
   saveOpenTabs();
 
-  renderSidebar();
+  renderSidebar({ autoOpenAdd });
   renderMainProject();
   renderGeneralSettingsForm();
   renderAiConfigForm();
@@ -922,13 +922,13 @@ async function closeTab(projectId) {
 
 async function deleteProject(projectId) {
   await api(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
-  await loadState();
+  await loadState({ autoOpenAdd: true });
   await refreshWorktrees();
 }
 
 async function deleteWorkspace(wsId) {
   await api(`/api/workspaces/${encodeURIComponent(wsId)}`, { method: 'DELETE' });
-  await loadState();
+  await loadState({ autoOpenAdd: true });
   await refreshWorktrees();
 }
 
@@ -2717,6 +2717,13 @@ async function removeWorktreeRow(branch, item = null) {
 }
 
 // Browser modal
+function openAddTargetModal() {
+  const modal = $('modal-browser');
+  if (!modal || !modal.classList.contains('hidden')) return;
+  openModal('modal-browser');
+  browseTo(state.browseCurrentPath);
+}
+
 async function browseTo(path = '') {
   try {
     const res = await api(`/api/fs/browse?path=${encodeURIComponent(path)}`);
@@ -3094,18 +3101,11 @@ function bindEvents() {
   $('btn-ai-progress-close-x')?.addEventListener('click', closeAiProgressModal);
   $('btn-ai-progress-close')?.addEventListener('click', closeAiProgressModal);
 
-  $('btn-add-target').addEventListener('click', () => {
-    openModal('modal-browser');
-    browseTo(state.browseCurrentPath);
-  });
+  $('btn-add-target').addEventListener('click', openAddTargetModal);
   $('btn-toggle-sidebar')?.addEventListener('click', () => {
     const layoutEl = $('workspace-layout');
     const isCollapsed = Boolean(layoutEl?.classList.contains('sidebar-collapsed'));
     applySidebarCollapsed(!isCollapsed, true);
-  });
-  $('btn-empty-add').addEventListener('click', () => {
-    openModal('modal-browser');
-    browseTo(state.browseCurrentPath);
   });
 
   $('btn-browse-up').addEventListener('click', () => {
@@ -3432,7 +3432,7 @@ async function init() {
   initTheme();
   initSidebarCollapsed();
   bindEvents();
-  await Promise.all([loadHealth(true), loadState()]);
+  await Promise.all([loadHealth(true), loadState({ autoOpenAdd: true })]);
   await refreshWorktrees();
 }
 
