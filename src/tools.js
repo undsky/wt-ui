@@ -542,7 +542,7 @@ export async function spawnInNewTerminal({
   const pref = String(preferredTerminal || '').trim().toLowerCase();
 
   if (process.platform === 'win32') {
-    const title = `wt-ui ${branch || tool.name}`.replace(/["%^&|<>]/g, '');
+    const title = `wtui ${branch || tool.name}`.replace(/["%^&|<>]/g, '');
     const runnerPath = argv
       ? writeWindowsRunnerScript({ cwd, command: argv[0], args: argv.slice(1) })
       : null;

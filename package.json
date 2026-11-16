@@ -1,10 +1,10 @@
 {
-  "name": "wt-ui",
+  "name": "wtui",
   "version": "0.1.0",
   "description": "Visual web UI platform for Worktrunk (wt) git worktree workflows",
   "type": "module",
   "bin": {
-    "wt-ui": "./bin/wt-ui.js"
+    "wtui": "./bin/wt-ui.js"
   },
   "files": [
     "bin/",

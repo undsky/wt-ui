@@ -13,13 +13,13 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const pkg = JSON.parse(readFileSync(resolve(__dirname, '..', 'package.json'), 'utf8'));
 
 function printHelp() {
-  console.log(`wt-ui v${pkg.version} — Git Worktree 可视化操作平台
+  console.log(`wtui v${pkg.version} — Git Worktree 可视化操作平台
 
 用法:
-  wt-ui start [path] [options]   启动 Web 可视化平台并打开浏览器
-  wt-ui doctor [--wt-bin <path>] 检查 Worktrunk (wt) 与 Git 环境
-  wt-ui --help                   显示帮助信息
-  wt-ui --version                显示版本号
+  wtui start [path] [options]   启动 Web 可视化平台并打开浏览器
+  wtui doctor [--wt-bin <path>] 检查 Worktrunk (wt) 与 Git 环境
+  wtui --help                   显示帮助信息
+  wtui --version                显示版本号
 
 选项 (start):
   -p, --port <port>              指定端口 (默认 4173)
@@ -71,7 +71,7 @@ function parseArgs(argv) {
       i = taken.nextIdx;
       flags.wtBin = taken.value;
     } else if (raw.startsWith('-')) {
-      throw new Error(`未知参数: ${raw}（运行 wt-ui --help 查看可用选项）`);
+      throw new Error(`未知参数: ${raw}（运行 wtui --help 查看可用选项）`);
     } else {
       positionals.push(raw);
     }
@@ -94,7 +94,7 @@ function printInstallGuide(env) {
 
 async function runDoctor(wtBin) {
   const env = await checkEnvironment({ wtBin });
-  console.log('wt-ui 环境检查:');
+  console.log('wtui 环境检查:');
   console.log(`  Node.js : ${process.version}`);
   console.log(`  Worktrunk (wt): ${env.wtBin ? `${env.wtVersion || 'found'} (${env.wtBin})` : '未找到'}`);
   console.log(`  Git     : ${env.gitVersion || '未找到'} (${env.gitSupported ? '满足 >= 2.43.0' : '不满足 >= 2.43.0'})`);
@@ -185,7 +185,7 @@ async function main() {
   const hasExplicitCommand = ['start', 'doctor', 'help', 'version'].includes(command);
   const targetPath = command === 'start' ? positionals[1] : positionals[0];
   if (!hasExplicitCommand && targetPath && !existsSync(resolve(targetPath))) {
-    throw new Error(`未知子命令或不存在的路径: ${targetPath}（运行 wt-ui --help 查看用法）`);
+    throw new Error(`未知子命令或不存在的路径: ${targetPath}（运行 wtui --help 查看用法）`);
   }
   if (targetPath) {
     await preloadTarget(targetPath);
@@ -216,7 +216,7 @@ async function main() {
   const browseHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host;
   const url = `http://${browseHost}:${actualPort}`;
 
-  console.log(`\nwt-ui v${pkg.version} 已启动: ${url}`);
+  console.log(`\nwtui v${pkg.version} 已启动: ${url}`);
   if (env.wtBin) {
     console.log(`Worktrunk: ${env.wtVersion || ''} (${env.wtBin})`);
   } else {

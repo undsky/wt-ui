@@ -444,7 +444,7 @@ export async function completeConflictMerge(workDir, options = {}) {
   } else if (inProgressOp === 'merge' || hasStagedChanges) {
     const commitMsg = options.sourceBranch
       ? `Merge branch '${options.sourceBranch}' into ${options.targetBranch || 'HEAD'}`
-      : 'Merge branch (resolved conflicts in wt-ui)';
+      : 'Merge branch (resolved conflicts in wtui)';
 
     let commitRes = await runGit(workDir, ['commit', '--no-edit'], { timeout: 30_000 });
     if (!commitRes.ok) {

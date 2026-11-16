@@ -1,4 +1,4 @@
-# wt-ui
+# wtui
 
 Git Worktree 可视化操作平台。多 AI 工具并行开发，一键合并与 AI 冲突解决。
 
@@ -9,14 +9,14 @@ Git Worktree 可视化操作平台。多 AI 工具并行开发，一键合并与
 npm link
 
 # 启动可视化平台并自动打开浏览器
-wt-ui start
+wtui start
 
 # 也可在启动时直接加载指定项目或 .code-workspace 文件
-wt-ui start E:\path\to\project
-wt-ui start E:\path\to\workspace.code-workspace
+wtui start E:\path\to\project
+wtui start E:\path\to\workspace.code-workspace
 
 # 检查 Worktrunk 与 Git 环境
-wt-ui doctor
+wtui doctor
 ```
 
 ## 核心功能

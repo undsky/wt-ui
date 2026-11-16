@@ -114,7 +114,7 @@ async function downloadWithTimeout(url, { minBytes = 1024, idleTimeoutMs = 30_00
     const res = await fetch(url, {
       redirect: 'follow',
       signal: controller.signal,
-      headers: { 'User-Agent': 'wt-ui-installer' },
+      headers: { 'User-Agent': 'wtui-installer' },
     });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);

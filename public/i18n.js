@@ -2,7 +2,7 @@ const LANG_STORAGE_KEY = 'wt-ui-lang';
 
 export const MESSAGES = {
   zh: {
-    pageTitle: 'wt-ui — Worktrunk 可视化工作树平台',
+    pageTitle: 'Git Worktree 可视化操作平台',
     brandSub: 'Git Worktree 可视化操作平台',
     envChecking: '检查环境中...',
     manageTools: '设置',
@@ -276,7 +276,7 @@ export const MESSAGES = {
     conflictAutoPushHtml: '提交后自动推送到远程 (<code>git push</code>)',
   },
   en: {
-    pageTitle: 'wt-ui — Worktrunk Visual Worktree Console',
+    pageTitle: 'Git Worktree Visual Platform',
     brandSub: 'Git Worktree Visual Platform',
     envChecking: 'Checking environment...',
     manageTools: 'Settings',
