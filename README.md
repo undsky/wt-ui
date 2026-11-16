@@ -1,36 +1,59 @@
-# wtui
+# Git Worktree Visual Platform
 
-Git Worktree 可视化操作平台。多 AI 工具并行开发，一键合并与 AI 冲突解决。
+<div align="center">
+  <img src="./public/logo.png" alt="wtUI" width="120" />
+  <p>Parallel development with multiple AI tools, one-click merge, and AI-powered conflict resolution.</p>
+  <p>English | <a href="README.zh-CN.md">简体中文</a></p>
+  <p>
+    <a href="#quick-start">Quick Start</a> ·
+    <a href="#screenshots">Screenshots</a> ·
+    <a href="#key-features">Key Features</a> ·
+    <a href="#-community">Community</a> ·
+    <a href="#-license">License</a>
+  </p>
+</div>
 
-## 快速开始
+## Quick Start
 
 ```bash
-# 全局链接命令（在项目目录执行）
-npm link
+# Install globally
+npm i wtui -g
 
-# 启动可视化平台并自动打开浏览器
+# Start the visual platform and open it in your browser
 wtui start
-
-# 也可在启动时直接加载指定项目或 .code-workspace 文件
-wtui start E:\path\to\project
-wtui start E:\path\to\workspace.code-workspace
-
-# 检查 Worktrunk 与 Git 环境
-wtui doctor
 ```
 
-## 核心功能
+## Screenshots
 
-- **项目与工作区管理**：支持添加单个 Git 项目文件夹，或导入 VS Code / Cursor 的 `.code-workspace` 文件（自动解析相对路径并识别其中的 Git 仓库）。
-- **工具分类与自由配置**：
-  - **命令行工具 (CLI)**：`Claude Code`、`Codex CLI`、`OpenCode`、`Gemini CLI`、`CodeBuddy CLI`、`Qwen Code`、`Kimi CLI`、`Trae CLI`，在独立终端窗口中进入工作树并启动（对应 `wt switch -c <branch> -x claude`）。
-  - **图形界面工具 (GUI)**：`Cursor`、`VS Code`、`Windsurf`、`Qoder`、`Trae`、`CodeBuddy`、`Antigravity IDE`、`Kiro`，使用 `--no-cd` 打开工作树（对应 `wt switch --no-cd -x cursor -- .`）。
-  - 支持在设置中配置界面语言、明暗主题、首选终端、开机自启、AI 接口及自定义 CLI/GUI 工具，并为各个工作树记忆上次使用的工具。
-- **工作树状态总览**：基于 `wt list --format=json --branches` 实时展示分支状态、未提交变更、与默认分支的提交/代码行差异、合并状态、冲突检测与可视化/AI 冲突解决。
-- **一键合并与清理**：调用 `wt merge <target> --branch <branch> --format=json -y` 完成 Squash、Rebase、快进合并与工作树清理，并支持可选参数（`--no-squash`、`--no-commit`、`--no-rebase`、`--no-ff`、`--no-remove`、`--no-hooks`）及合并后自动推送。
+![Main Interface (Light Theme / Chinese)](https://fastly.jsdelivr.net/gh/undsky/doudou-cdn-stg@main/2026/11/16/1794806498647-69869e15-2d1b-4893-9e65-b2b43ea1391c.png)
 
-## 环境要求
+![Merge Conflict Resolution (Visual & AI-Assisted)](https://fastly.jsdelivr.net/gh/undsky/doudou-cdn-stg@main/2026/11/16/1794806504662-e805bcf4-2d8b-4397-bdaa-c6080980b6fe.jpg)
 
-- Node.js >= 20
-- Worktrunk (`wt`)
-- Git >= 2.43.0（Worktrunk 最低要求）
+![Main Interface (Dark Theme / English)](https://fastly.jsdelivr.net/gh/undsky/doudou-cdn-stg@main/2026/11/16/1794806507456-fee7fb12-8d61-43ba-8dcd-294117ea4eed.png)
+
+## Key Features
+
+- **Project & Workspace Management**: Add individual Git project folders or `.code-workspace` workspaces.
+- **Parallel Development with Multiple AI Tools**:
+  - **Worktree Isolation & Status Overview**: Create worktrees and launch tools in one click, with real-time branch status, diff tracking, conflict risk detection, and per-branch pull/push.
+  - **Works with Any CLI / GUI Tool**: Built-in support for popular AI coding CLIs and graphical IDEs, launchable in standalone terminals or editors with custom extensions.
+- **One-Click Merge & AI Conflict Resolution**:
+  - **One-Click Merge & Cleanup**: Supports Squash, Rebase, Fast-Forward merges, and automatic cleanup & push with configurable merge options.
+  - **Visual Conflict Resolution**: Automatically opens a conflict panel on merge conflicts, supporting hunk-by-hunk comparison, direct source editing, staging, and aborting.
+  - **AI One-Click Merge & Commit**: Configure an OpenAI or Anthropic-compatible API to automatically analyze and resolve conflicts and complete the merge commit.
+
+## 💬 Community
+
+|                WeChat Official Account                |                   QQ Group                    |
+| :---------------------------------------------------: | :-------------------------------------------: |
+| ![WeChat Official Account](https://cdn.undsky.com/img/gh.jpg) | ![QQ Group](https://cdn.undsky.com/img/qqqun.jpg) |
+
+---
+
+## 📄 License
+
+This project is licensed under [CC BY-NC 4.0](LICENSE).
+
+- Free to use for personal, educational, research, and non-commercial purposes.
+- Attribution is required when publicly distributing derivative works.
+- Commercial use requires separate authorization; please contact the author.
