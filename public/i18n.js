@@ -187,7 +187,7 @@ export const MESSAGES = {
     addedToolToast: '已添加自定义工具',
     envCheckPassToast: '环境检测通过，Worktrunk 已就绪',
     envCheckFailToast: '仍未满足环境要求，请查看提示',
-    conflictModalTitle: '可视化解决合并冲突',
+    conflictModalTitle: '解决合并冲突',
     conflictFilesTitle: '冲突文件列表',
     conflictVisualViewBtn: '分块对比视图',
     conflictRawViewBtn: '源码编辑视图',
