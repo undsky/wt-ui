@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { formatCommand, parseWtJson, runWt } from './wt-resolver.js';
@@ -240,23 +240,52 @@ export function quotePosixArg(arg) {
 /**
  * Spawn a detached process without ever crashing the server: a missing binary
  * emits an async 'error' event which would otherwise be unhandled.
+ * When `earlyExitGraceMs > 0`, wait briefly for immediate failures so callers
+ * can fall back instead of silently reporting success.
  * @returns {Promise<{ ok: boolean, error?: string }>}
  */
 export function spawnDetached(command, args, options = {}) {
+  const { earlyExitGraceMs = 0, ...spawnOptions } = options;
   return new Promise((resolvePromise) => {
     let child;
+    let settled = false;
+    let timer = null;
+    const finish = (res) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolvePromise(res);
+    };
     try {
-      child = spawn(command, args, { detached: true, stdio: 'ignore', ...options });
+      child = spawn(command, args, { detached: true, stdio: 'ignore', ...spawnOptions });
     } catch (err) {
-      resolvePromise({ ok: false, error: err?.message || String(err) });
+      finish({ ok: false, error: err?.message || String(err) });
       return;
     }
     child.once('error', (err) => {
-      resolvePromise({ ok: false, error: `${command}: ${err?.message || String(err)}` });
+      finish({ ok: false, error: `${command}: ${err?.message || String(err)}` });
     });
     child.once('spawn', () => {
-      child.unref();
-      resolvePromise({ ok: true });
+      if (earlyExitGraceMs <= 0) {
+        child.unref();
+        finish({ ok: true });
+        return;
+      }
+      child.once('exit', (code, signal) => {
+        if (code === 0) {
+          finish({ ok: true });
+        } else {
+          finish({ ok: false, error: `${command} exited with code ${code ?? signal}` });
+        }
+      });
+      timer = setTimeout(() => {
+        try {
+          child.unref();
+        } catch {
+          // ignore
+        }
+        finish({ ok: true });
+      }, earlyExitGraceMs);
     });
   });
 }
@@ -316,6 +345,34 @@ function findWindowsGitBash() {
     'C:\\Program Files\\Git\\git-bash.exe',
   ].filter(Boolean);
   return candidates.find((p) => existsSync(p)) || null;
+}
+
+function hasWindowsAppEntry(candidate) {
+  try {
+    // Windows App Execution Aliases (WindowsApps\wt.exe) are reparse points where statSync/existsSync fails with EACCES.
+    const st = lstatSync(candidate);
+    return st.isFile() || st.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve Windows Terminal's `wt.exe` without accidentally hitting Worktrunk's `wt.exe` on PATH.
+ */
+export function findWindowsTerminal({
+  localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'),
+  pathEnv = process.env.PATH || '',
+} = {}) {
+  const windowsAppsWt = join(localAppData, 'Microsoft', 'WindowsApps', 'wt.exe');
+  if (hasWindowsAppEntry(windowsAppsWt)) return windowsAppsWt;
+  for (const dir of pathEnv.split(delimiter).filter(Boolean)) {
+    const wtCandidate = join(dir, 'wt.exe');
+    if (hasWindowsAppEntry(wtCandidate) && hasWindowsAppEntry(join(dir, 'WindowsTerminal.exe'))) {
+      return wtCandidate;
+    }
+  }
+  return null;
 }
 
 /**
@@ -558,9 +615,21 @@ export async function spawnInNewTerminal({
     };
 
     if (pref === 'wt') {
-      const wtArgs = [...(cwd ? ['-d', cwd] : []), 'cmd.exe', ...(runnerPath ? ['/k', process.execPath, runnerPath] : ['/k'])];
-      const wtRes = await spawnDetached('wt.exe', wtArgs, { cwd: cwd || undefined, windowsHide: false });
-      if (wtRes.ok) return wtRes;
+      const wtTerminalBin = findWindowsTerminal();
+      if (wtTerminalBin) {
+        const escapeWtArg = (arg) => String(arg).replace(/;/g, '\\;');
+        const wtArgs = [
+          ...(cwd ? ['-d', escapeWtArg(cwd)] : []),
+          'cmd.exe',
+          ...(runnerPath ? ['/k', escapeWtArg(process.execPath), escapeWtArg(runnerPath)] : ['/k']),
+        ];
+        const wtRes = await spawnDetached(wtTerminalBin, wtArgs, {
+          cwd: cwd || undefined,
+          windowsHide: false,
+          earlyExitGraceMs: 400,
+        });
+        if (wtRes.ok) return wtRes;
+      }
     } else if (pref === 'powershell' || pref === 'pwsh') {
       const psBin = pref === 'pwsh' && isOnPath('pwsh.exe', 'win32') ? 'pwsh.exe' : 'powershell.exe';
       const psQuote = (s) => `'${String(s ?? '').replace(/'/g, "''")}'`;

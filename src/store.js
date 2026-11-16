@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, posix as pathPosix, resolve, win32 as pathWin32 } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -78,7 +78,15 @@ export function getDefaultPreferredTerminal(platform = process.platform) {
         : 'terminal';
   } else if (platform === 'win32') {
     const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
-    resolved = existsSync(join(localAppData, 'Microsoft', 'WindowsApps', 'wt.exe')) ? 'wt' : 'cmd';
+    const wtAliasPath = join(localAppData, 'Microsoft', 'WindowsApps', 'wt.exe');
+    let hasWt = false;
+    try {
+      const st = lstatSync(wtAliasPath);
+      hasWt = st.isFile() || st.isSymbolicLink();
+    } catch {
+      hasWt = false;
+    }
+    resolved = hasWt ? 'wt' : 'cmd';
   }
   preferredTerminalCache.set(platform, resolved);
   return resolved;

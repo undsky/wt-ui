@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { getManagedWtBinPath } from './wt-installer.js';
@@ -42,16 +42,26 @@ export function compareVersions(a, b) {
 }
 
 /**
+ * Return true if `binPath` refers to Windows Terminal's `wt.exe` rather than Worktrunk.
+ * Running `--version` on Windows Terminal opens a modal Help dialog that blocks `wt.exe` IPC.
+ * @param {string} binPath
+ */
+export function isWindowsTerminalBinary(binPath, platform = process.platform) {
+  if (platform !== 'win32' || !binPath) return false;
+  if (WINDOWS_TERMINAL_PATTERN.test(binPath) || /^wt(?:\.exe)?$/i.test(binPath)) {
+    return true;
+  }
+  return /(?:^|[/\\])wt\.exe$/i.test(binPath) && existsSync(join(dirname(binPath), 'WindowsTerminal.exe'));
+}
+
+/**
  * Check if a candidate binary is Worktrunk's `wt` (and not Windows Terminal).
  * @param {string} binPath
  * @returns {Promise<{ ok: boolean, version: string | null }>}
  */
 async function probeWtBinary(binPath) {
   if (!binPath) return { ok: false, version: null };
-  if (
-    process.platform === 'win32' &&
-    (WINDOWS_TERMINAL_PATTERN.test(binPath) || /^wt(?:\.exe)?$/i.test(binPath))
-  ) {
+  if (isWindowsTerminalBinary(binPath)) {
     return { ok: false, version: null };
   }
   try {
