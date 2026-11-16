@@ -17,7 +17,7 @@
 
 ```bash
 # Install globally
-npm i wtui -g
+npm i @undsky/wtui -g
 
 # Start the visual platform and open it in your browser
 wtui start

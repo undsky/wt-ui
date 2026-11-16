@@ -17,7 +17,7 @@
 
 ```bash
 # 全局安装
-npm i wtui -g
+npm i @undsky/wtui -g
 
 # 启动可视化平台并自动打开浏览器
 wtui start

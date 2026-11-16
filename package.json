@@ -1,8 +1,11 @@
 {
-  "name": "wtui",
+  "name": "@undsky/wtui",
   "version": "0.1.0",
   "description": "Visual web UI platform for Worktrunk (wt) git worktree workflows",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "wtui": "./bin/wt-ui.js"
   },
