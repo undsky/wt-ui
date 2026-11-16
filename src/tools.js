@@ -1,9 +1,12 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { basename, delimiter, join } from 'node:path';
+import { promisify } from 'node:util';
 import { formatCommand, parseWtJson, runWt } from './wt-resolver.js';
+
+const execFileAsync = promisify(execFile);
 
 export const BUILTIN_TOOLS = [
   {
@@ -182,6 +185,10 @@ export function findToolById(toolId, customTools = []) {
   return getAllTools(customTools).find((t) => t.id === toolId) || null;
 }
 
+export function normalizeToolCommand(command) {
+  return String(command || '').trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1').trim();
+}
+
 /**
  * Build human-readable `wt switch ...` command preview matching Worktrunk docs.
  */
@@ -192,14 +199,15 @@ export function buildDisplaySwitchCommand({ branch, create, base, tool, prompt }
   if (base) {
     args.push('--base', base);
   }
-  if (tool && tool.kind === 'gui' && tool.command) {
-    args.push('--no-cd', '-x', tool.command);
+  const cmd = normalizeToolCommand(tool?.command);
+  if (tool && tool.kind === 'gui' && cmd) {
+    args.push('--no-cd', '-x', cmd);
     const toolArgs = [...(tool.args || [])];
     if (toolArgs.length > 0) {
       args.push('--', ...toolArgs);
     }
-  } else if (tool && tool.kind === 'cli' && tool.command) {
-    args.push('-x', tool.command);
+  } else if (tool && tool.kind === 'cli' && cmd) {
+    args.push('-x', cmd);
     const extra = [...(tool.args || [])];
     if (prompt && tool.supportsPrompt) {
       extra.push(prompt);
@@ -297,22 +305,34 @@ function isExecutableFile(candidate, platform = process.platform) {
       accessSync(candidate, fsConstants.X_OK);
     }
     return true;
-  } catch {
+  } catch (err) {
+    if (
+      platform === 'win32' &&
+      (err?.code === 'EACCES' || err?.code === 'EPERM' || err?.code === 'EINVAL' || err?.code === 'UNKNOWN')
+    ) {
+      try {
+        const st = lstatSync(candidate);
+        return st.isFile() || st.isSymbolicLink();
+      } catch {
+        return false;
+      }
+    }
     return false;
   }
 }
 
-export function isOnPath(bin, platform = process.platform) {
-  if (!bin) return false;
+export function isOnPath(bin, platform = process.platform, { pathEnv, pathExt } = {}) {
+  const cleanBin = normalizeToolCommand(bin);
+  if (!cleanBin) return false;
   const exts =
-    platform === 'win32' && !/\.[a-z0-9]+$/i.test(bin)
-      ? ['', ...(process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)]
+    platform === 'win32' && !/\.[a-z0-9]+$/i.test(cleanBin)
+      ? (pathExt ?? process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
       : [''];
-  if (bin.includes('/') || bin.includes('\\')) {
-    return exts.some((ext) => isExecutableFile(`${bin}${ext}`, platform));
+  if (cleanBin.includes('/') || cleanBin.includes('\\')) {
+    return exts.some((ext) => isExecutableFile(`${cleanBin}${ext}`, platform));
   }
-  const pathDirs = (process.env.PATH || '').split(delimiter).filter(Boolean);
-  return pathDirs.some((dir) => exts.some((ext) => isExecutableFile(join(dir, `${bin}${ext}`), platform)));
+  const pathDirs = String(pathEnv ?? process.env.PATH ?? '').split(delimiter).filter(Boolean);
+  return pathDirs.some((dir) => exts.some((ext) => isExecutableFile(join(dir, `${cleanBin}${ext}`), platform)));
 }
 
 const MACOS_GUI_APP_BUNDLES = {
@@ -334,6 +354,101 @@ function hasMacApp(appBundleName) {
     existsSync(join('/Applications', appBundleName)) ||
     existsSync(join(homedir(), 'Applications', appBundleName))
   );
+}
+
+async function isOnPosixLoginShell(cmd, userShell = process.env.SHELL || '/bin/sh') {
+  const shellName = basename(userShell).toLowerCase();
+  let args;
+  if (shellName === 'fish') {
+    args = ['-lc', 'command -v -- $argv[1] >/dev/null 2>&1', cmd];
+  } else if (shellName === 'zsh' || shellName === 'bash') {
+    args = ['-lic', 'command -v -- "$1" >/dev/null 2>&1', '_', cmd];
+  } else {
+    args = ['-lc', 'command -v -- "$1" >/dev/null 2>&1', '_', cmd];
+  }
+  try {
+    await execFileAsync(userShell, args, {
+      timeout: 2500,
+      windowsHide: true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function formatMissingToolMessage(tool) {
+  const kindLabel = tool?.kind === 'cli' ? '命令行工具' : '图形界面工具';
+  const name = tool?.name || tool?.command || '';
+  const command = tool?.command || '';
+  return `未检测到${kindLabel}「${name}」(${command})，请检查是否已安装并配置到环境变量 PATH（可在「设置 → 工具」中核对命令）。`;
+}
+
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Detect runtime command-not-found errors when `wt switch -x` executes a GUI tool
+ * (including garbled Windows `cmd.exe` OEM/GBK output decoded as UTF-8).
+ */
+export function isToolMissingOutput(output, command) {
+  const text = String(output || '');
+  if (!text) return false;
+  const execIdx = text.search(/Executing\s*\(--execute\)/i);
+  const execSection = execIdx >= 0 ? text.slice(execIdx) : text;
+  if (
+    /is not recognized as an internal or external command/i.test(execSection) ||
+    /不是内部或外部命令/.test(execSection) ||
+    /command not found|No such file or directory|Unable to find application named|ENOENT/i.test(execSection)
+  ) {
+    return true;
+  }
+  if (execIdx >= 0 && command) {
+    const cmdPattern = new RegExp(`['"]?${escapeRegExp(command)}['"]?\\s+\\uFFFD{2,}`, 'i');
+    if (cmdPattern.test(execSection)) return true;
+  }
+  return false;
+}
+
+/**
+ * Check whether the configured CLI or GUI tool command can be resolved on the current platform.
+ * @returns {Promise<{ available: boolean, command: string, kind: string, reason?: string }>}
+ */
+export async function checkToolAvailability(
+  tool,
+  { platform = process.platform, pathEnv, pathExt, shell, checkShellFn } = {}
+) {
+  const kind = tool?.kind === 'cli' ? 'cli' : 'gui';
+  const cmd = normalizeToolCommand(tool?.command);
+  if (!cmd) {
+    return { available: true, command: '', kind };
+  }
+
+  if (isOnPath(cmd, platform, { pathEnv, pathExt })) {
+    return { available: true, command: cmd, kind };
+  }
+
+  if (platform === 'darwin' && kind === 'gui') {
+    if (/\.app$/i.test(cmd) && (existsSync(cmd) || (!cmd.includes('/') && hasMacApp(cmd)))) {
+      return { available: true, command: cmd, kind };
+    }
+    const macAppBundle = MACOS_GUI_APP_BUNDLES[cmd];
+    if (macAppBundle && hasMacApp(macAppBundle)) {
+      return { available: true, command: cmd, kind };
+    }
+  }
+
+  if (platform !== 'win32' && kind === 'cli' && pathEnv === undefined && !cmd.includes('/') && !cmd.includes('\\')) {
+    const foundInShell = checkShellFn
+      ? await checkShellFn(cmd)
+      : await isOnPosixLoginShell(cmd, shell);
+    if (foundInShell) {
+      return { available: true, command: cmd, kind };
+    }
+  }
+
+  return { available: false, command: cmd, kind, reason: 'not_found' };
 }
 
 function findWindowsGitBash() {
@@ -546,9 +661,21 @@ function resolveWinBin(cmd) {
 }
 const bin = resolveWinBin(cfg.command);
 const isBatch = /\.(?:cmd|bat)$/i.test(bin);
+function quoteCmdLineArg(arg) {
+  const s = String(arg ?? '').replace(/[\r\n]+/g, ' ');
+  if (!s) return '""';
+  if (/[\s"&|<>^(),;=!%]/.test(s)) {
+    return '"' + s.replace(/"/g, '"^""') + '"';
+  }
+  return s;
+}
 try {
   const res = isBatch
-    ? spawnSync('cmd.exe', ['/d', '/c', bin, ...cfg.args], { stdio: 'inherit', cwd: cfg.cwd || undefined })
+    ? spawnSync('cmd.exe', ['/d', '/s', '/c', '"' + [bin, ...cfg.args].map(quoteCmdLineArg).join(' ') + '"'], {
+        stdio: 'inherit',
+        cwd: cfg.cwd || undefined,
+        windowsVerbatimArguments: true,
+      })
     : spawnSync(bin, cfg.args, { stdio: 'inherit', cwd: cfg.cwd || undefined });
   if (res.error) { console.error(res.error.message); process.exitCode = 1; }
   else if (typeof res.status === 'number' && res.status !== 0) { process.exitCode = res.status; }
@@ -595,7 +722,8 @@ export async function spawnInNewTerminal({
     extraArgs.push(prompt);
   }
   const cwd = worktreePath && existsSync(worktreePath) ? worktreePath : repoPath;
-  const argv = tool.command ? [tool.command, ...extraArgs] : null;
+  const cmd = normalizeToolCommand(tool.command);
+  const argv = cmd ? [cmd, ...extraArgs] : null;
   const pref = String(preferredTerminal || '').trim().toLowerCase();
 
   if (process.platform === 'win32') {
@@ -831,6 +959,27 @@ export async function spawnInNewTerminal({
   };
 }
 
+function buildMissingToolResult(tool, displayCommand, extra = {}) {
+  const msg = formatMissingToolMessage(tool);
+  return {
+    ok: false,
+    toolMissing: true,
+    missingTool: {
+      id: tool.id || null,
+      name: tool.name || tool.command || '',
+      kind: tool.kind === 'cli' ? 'cli' : 'gui',
+      command: tool.command || '',
+    },
+    command: displayCommand,
+    executedCommand: '',
+    stdout: '',
+    stderr: msg,
+    error: msg,
+    data: null,
+    ...extra,
+  };
+}
+
 /**
  * Execute `wt switch` (creating or switching to a worktree) and optionally launch a CLI or GUI tool.
  */
@@ -846,8 +995,16 @@ export async function switchAndOpenWorktree({
   preferredTerminal = '',
   passYes = true,
   noHooks = false,
+  availabilityOptions,
 }) {
   const displayCommand = buildDisplaySwitchCommand({ branch, create, base, tool, prompt });
+
+  if (tool && tool.command) {
+    const availability = await checkToolAvailability(tool, availabilityOptions);
+    if (!availability.available) {
+      return buildMissingToolResult(tool, displayCommand);
+    }
+  }
 
   // Run `wt switch` once with --no-cd --format=json to handle creation/hooks/validation cleanly.
   const baseArgs = ['switch'];
@@ -861,21 +1018,24 @@ export async function switchAndOpenWorktree({
   baseArgs.push('--format=json');
 
   // For GUI tools, pass `-x` directly to `wt switch` on this single invocation.
-  const isGui = tool && tool.kind === 'gui' && tool.command;
+  const toolCmd = normalizeToolCommand(tool?.command);
+  const isGui = tool && tool.kind === 'gui' && toolCmd;
   if (isGui) {
     const toolArgs = [...(tool.args || [])];
-    const macAppBundle = MACOS_GUI_APP_BUNDLES[tool.command];
-    if (process.platform === 'win32' && tool.command !== 'explorer.exe') {
-      baseArgs.push('-x', 'cmd.exe', '--', '/C', tool.command, ...toolArgs);
+    const macAppBundle = MACOS_GUI_APP_BUNDLES[toolCmd];
+    if (process.platform === 'win32' && toolCmd !== 'explorer.exe') {
+      baseArgs.push('-x', 'cmd.exe', '--', '/C', toolCmd, ...toolArgs);
+    } else if (process.platform === 'darwin' && /\.app$/i.test(toolCmd)) {
+      baseArgs.push('-x', 'open', '--', '-a', toolCmd, ...(toolArgs.length > 0 ? toolArgs : ['.']));
     } else if (
       process.platform === 'darwin' &&
-      !isOnPath(tool.command, 'darwin') &&
+      !isOnPath(toolCmd, 'darwin') &&
       macAppBundle &&
       hasMacApp(macAppBundle)
     ) {
       baseArgs.push('-x', 'open', '--', '-a', macAppBundle, ...(toolArgs.length > 0 ? toolArgs : ['.']));
     } else {
-      baseArgs.push('-x', tool.command);
+      baseArgs.push('-x', toolCmd);
       if (toolArgs.length > 0) {
         baseArgs.push('--', ...toolArgs);
       }
@@ -886,6 +1046,14 @@ export async function switchAndOpenWorktree({
   const json = parseWtJson(result.stdout);
 
   if (!result.ok && !json) {
+    const combined = [result.stdout, result.stderr].filter(Boolean).join('\n');
+    if (isGui && isToolMissingOutput(combined, tool.command)) {
+      return buildMissingToolResult(tool, displayCommand, {
+        executedCommand: result.command,
+        stdout: result.stdout,
+        worktreeCreated: /Created branch|Created worktree/i.test(combined),
+      });
+    }
     return {
       ok: false,
       command: displayCommand,

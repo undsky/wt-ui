@@ -965,6 +965,29 @@ async function switchWorktreeWithClobberPrompt(payload) {
   }
 }
 
+function formatSwitchErrorMessage(err) {
+  const missingTool = err?.payload?.missingTool;
+  if (err?.payload?.toolMissing && missingTool) {
+    const key = missingTool.kind === 'cli' ? 'toolMissingCliError' : 'toolMissingGuiError';
+    return t(key, {
+      name: missingTool.name || missingTool.command || '',
+      command: missingTool.command || '',
+    });
+  }
+  return err?.payload?.stderr || err?.message || '';
+}
+
+async function handleSwitchError(err, fallbackTarget = '') {
+  const displayErr = err?.approvalCancelled ? err.message : formatSwitchErrorMessage(err);
+  if (!err?.clobberCancelled && !err?.approvalCancelled) {
+    appendLog(t('logFail', { target: err?.payload?.command || fallbackTarget }), displayErr);
+  }
+  showToast(displayErr, err?.approvalCancelled ? 'info' : 'error');
+  if (err?.payload?.worktreeCreated) {
+    await refreshWorktrees();
+  }
+}
+
 async function openWorktreeRow(branch, shouldCreate, base = '', explicitToolId = '', displayLabel = '') {
   const active = getActiveProject();
   if (!active) return;
@@ -985,14 +1008,7 @@ async function openWorktreeRow(branch, shouldCreate, base = '', explicitToolId =
     showToast(t('openedWorktreeToast', { branch: label }), 'success');
     await refreshWorktrees();
   } catch (err) {
-    if (!err.clobberCancelled && !err.approvalCancelled) {
-      appendLog(t('logFail', { target: err.payload?.command || label }), err.payload?.stderr || err.message);
-    }
-    if (!err.approvalCancelled) {
-      showToast(err.payload?.stderr || err.message, 'error');
-    } else {
-      showToast(err.message, 'info');
-    }
+    await handleSwitchError(err, label);
   }
 }
 
@@ -3100,10 +3116,7 @@ function bindEvents() {
       showToast(t('worktreeReadyToast'), 'success');
       await refreshWorktrees();
     } catch (err) {
-      if (!err.clobberCancelled && !err.approvalCancelled) {
-        appendLog(t('logFail', { target: err.payload?.command || '' }), err.payload?.stderr || err.message);
-      }
-      showToast(err.approvalCancelled ? err.message : err.payload?.stderr || err.message, err.approvalCancelled ? 'info' : 'error');
+      await handleSwitchError(err, '');
     } finally {
       btn.disabled = false;
     }

@@ -48,6 +48,7 @@ import {
   findToolById,
   getAllTools,
   getSupportedTerminals,
+  normalizeToolCommand,
   switchAndOpenWorktree,
 } from './tools.js';
 
@@ -499,11 +500,11 @@ export function createAppServer({ wtBin: explicitWtBin, noAutoInstall = false } 
 
       if (req.method === 'POST' && pathname === '/api/tools') {
         const body = await readJsonBody(req);
+        const normalizedCommand = typeof body.command === 'string' ? normalizeToolCommand(body.command) : '';
         if (
           typeof body.name !== 'string' ||
           !body.name.trim() ||
-          typeof body.command !== 'string' ||
-          !body.command.trim()
+          !normalizedCommand
         ) {
           sendJson(res, 400, { error: '工具名称和命令不能为空' });
           return;
@@ -520,7 +521,7 @@ export function createAppServer({ wtBin: explicitWtBin, noAutoInstall = false } 
             id: toolId,
             name: body.name.trim(),
             kind: body.kind === 'gui' ? 'gui' : 'cli',
-            command: body.command.trim(),
+            command: normalizedCommand,
             args: Array.isArray(body.args)
               ? body.args.map((a) => String(a))
               : typeof body.args === 'string' && body.args.trim()
