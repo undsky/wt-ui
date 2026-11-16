@@ -335,7 +335,7 @@ function renderToolSelects() {
       for (const tool of g.items) {
         const opt = document.createElement('option');
         opt.value = tool.id;
-        opt.textContent = `${tool.name}${tool.command ? ` (${tool.command})` : ''}`;
+        opt.textContent = tool.name;
         if (tool.id === selectedId) opt.selected = true;
         optGroup.appendChild(opt);
       }
