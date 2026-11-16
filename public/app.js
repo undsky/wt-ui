@@ -3009,17 +3009,27 @@ function bindEvents() {
   });
   $('btn-add-direct').addEventListener('click', () => addTargetPath($('input-browse-path').value));
 
+  let pickingNative = false;
   const pickNative = async (mode) => {
+    if (pickingNative) return;
+    pickingNative = true;
+    const pickBtns = [$('btn-pick-folder'), $('btn-pick-workspace')];
+    pickBtns.forEach((btn) => { btn.disabled = true; });
     try {
       const res = await api('/api/fs/pick', {
         method: 'POST',
         body: JSON.stringify({ mode }),
       });
-      if (!res.cancelled && res.path) {
+      if (res.error) {
+        showToast(res.error, 'error');
+      } else if (!res.cancelled && res.path) {
         await addTargetPath(res.path);
       }
     } catch (err) {
       showToast(err.message, 'error');
+    } finally {
+      pickingNative = false;
+      pickBtns.forEach((btn) => { btn.disabled = false; });
     }
   };
   $('btn-pick-folder').addEventListener('click', () => pickNative('folder'));

@@ -300,34 +300,59 @@ export function browsePath(targetPath) {
  */
 export async function pickNativePath(mode = 'folder') {
   if (process.platform === 'win32') {
-    const script =
+    const dialogLines =
       mode === 'workspace'
         ? [
-            '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
-            'Add-Type -AssemblyName System.Windows.Forms',
             '$d = New-Object System.Windows.Forms.OpenFileDialog',
             "$d.Title = 'Select .code-workspace file'",
             "$d.Filter = 'Workspace (*.code-workspace)|*.code-workspace|All files (*.*)|*.*'",
-            'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }',
-          ].join('; ')
+            '$pick = { $d.FileName }',
+          ]
         : [
-            '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
-            'Add-Type -AssemblyName System.Windows.Forms',
             '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
             "$d.Description = 'Select Git project folder'",
-            'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }',
-          ].join('; ');
+            '$d.ShowNewFolderButton = $false',
+            '$pick = { $d.SelectedPath }',
+          ];
+
+    // The dialog is spawned from a background Node process, so Windows will not let it take
+    // the foreground (and `windowsHide` hides the process's first shown window). Show an
+    // invisible TopMost owner form first and parent the dialog to it, so the picker appears
+    // in front of the browser instead of silently waiting behind it until the timeout.
+    const script = [
+      '$ErrorActionPreference = "Stop"',
+      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+      'Add-Type -AssemblyName System.Windows.Forms',
+      '[System.Windows.Forms.Application]::EnableVisualStyles()',
+      '$owner = New-Object System.Windows.Forms.Form',
+      '$owner.TopMost = $true',
+      '$owner.ShowInTaskbar = $false',
+      '$owner.FormBorderStyle = "None"',
+      '$owner.StartPosition = "CenterScreen"',
+      '$owner.Size = New-Object System.Drawing.Size(1, 1)',
+      '$owner.Opacity = 0',
+      '$owner.Show()',
+      '$owner.Activate()',
+      ...dialogLines,
+      'try { $r = $d.ShowDialog($owner) } finally { $owner.Close(); $owner.Dispose() }',
+      'if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output (& $pick) }',
+    ].join('\n');
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
 
     try {
       const { stdout } = await execFileAsync(
         'powershell.exe',
-        ['-NoProfile', '-STA', '-Command', script],
-        { timeout: 120_000, windowsHide: true }
+        ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+        { timeout: 300_000, windowsHide: true }
       );
       const selected = (stdout || '').trim();
       return { cancelled: !selected, path: selected || null };
-    } catch {
-      return { cancelled: true, path: null };
+    } catch (err) {
+      if (err?.killed) {
+        return { cancelled: true, path: null, error: 'Native picker timed out' };
+      }
+      const detail = String(err?.stderr || err?.message || err).trim();
+      return { cancelled: true, path: null, error: `Native picker failed: ${detail}` };
     }
   }
 
