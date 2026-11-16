@@ -6,6 +6,7 @@ const SIDEBAR_COLLAPSED_KEY = 'wt_ui_sidebar_collapsed';
 const state = {
   env: null,
   appVersion: '0.1.0',
+  updateCheck: { status: 'idle', busy: false, action: 'check', data: null, error: null },
   workspaces: [],
   projects: [],
   tools: [],
@@ -2774,10 +2775,242 @@ function setSettingsTab(tab) {
   $('settings-pane-about')?.classList.toggle('hidden', !isAbout);
 }
 
+async function copyTextToClipboard(text) {
+  let copied = false;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch {
+      copied = false;
+    }
+  }
+  if (!copied) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    copied = document.execCommand('copy');
+    ta.remove();
+  }
+  if (!copied) throw new Error('copy failed');
+}
+
 function renderAboutPane() {
   const versionEl = $('about-version-text');
   if (versionEl) {
     versionEl.textContent = t('aboutVersionLabel', { version: state.appVersion || '0.1.0' });
+  }
+
+  const checkBtn = $('btn-check-update');
+  const checkBtnLabel = $('btn-check-update-label');
+  const { status, busy, action, data, error } = state.updateCheck;
+  const isInstallAction = action === 'install';
+
+  if (checkBtn) {
+    checkBtn.disabled = Boolean(busy);
+    checkBtn.classList.toggle('btn-primary', isInstallAction);
+    checkBtn.classList.toggle('btn-secondary', !isInstallAction);
+  }
+  if (checkBtnLabel) {
+    if (status === 'checking') {
+      checkBtnLabel.textContent = t('checkingUpdateBtn');
+    } else if (status === 'installing') {
+      checkBtnLabel.textContent = t('updatingNowBtn');
+    } else if (status === 'restarting') {
+      checkBtnLabel.textContent = t('restartingBtn');
+    } else if (isInstallAction) {
+      checkBtnLabel.textContent = t('updateNowBtn');
+    } else {
+      checkBtnLabel.textContent = t('checkUpdateBtn');
+    }
+  }
+
+  const statusRow = $('about-status-row');
+  const statusEl = $('about-update-status');
+  if (!statusEl) return;
+
+  if (status === 'idle') {
+    statusRow?.classList.add('hidden');
+    statusEl.innerHTML = '';
+    statusEl.classList.remove('is-success', 'is-update', 'is-error');
+    return;
+  }
+
+  statusRow?.classList.remove('hidden');
+  statusEl.classList.remove('is-success', 'is-update', 'is-error');
+
+  if (status === 'checking') {
+    statusEl.innerHTML = `<span class="about-update-text">${escapeHtml(t('aboutUpdateChecking'))}</span>`;
+    return;
+  }
+
+  if (status === 'up-to-date') {
+    statusEl.classList.add('is-success');
+    const ver = data?.latestVersion || data?.currentVersion || state.appVersion || '0.1.0';
+    statusEl.innerHTML = `<span class="about-update-text">${escapeHtml(t('aboutUpdateLatest', { version: ver }))}</span>`;
+    return;
+  }
+
+  if (status === 'update-available') {
+    statusEl.classList.add('is-update');
+    const ver = data?.latestVersion || '';
+    statusEl.innerHTML = `<span class="about-update-text">${escapeHtml(t('aboutUpdateAvailable', { version: ver }))}</span>`;
+    return;
+  }
+
+  if (status === 'installing') {
+    statusEl.classList.add('is-update');
+    const ver = data?.latestVersion || '';
+    statusEl.innerHTML = `<span class="about-update-text">${escapeHtml(t('aboutUpdateInstalling', { version: ver }))}</span>`;
+    return;
+  }
+
+  if (status === 'restarting') {
+    statusEl.classList.add('is-success');
+    statusEl.innerHTML = `<span class="about-update-text">${escapeHtml(t('aboutUpdateRestarting'))}</span>`;
+    return;
+  }
+
+  if (status === 'error') {
+    statusEl.classList.add('is-error');
+    const msgKey = isInstallAction ? 'aboutUpdateInstallError' : 'aboutUpdateError';
+    statusEl.innerHTML = `<span class="about-update-text">${escapeHtml(t(msgKey, { error: error || '' }))}</span>`;
+  }
+}
+
+async function waitForRestartedServer(previousInstanceId, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  await new Promise((r) => setTimeout(r, 400));
+
+  while (Date.now() < deadline) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1500);
+    try {
+      const res = await fetch('/api/health', {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        const health = await res.json().catch(() => null);
+        if (health?.instanceId && health.instanceId !== previousInstanceId) {
+          window.location.reload();
+          return true;
+        }
+      }
+    } catch {
+      // Server is restarting; retry
+    } finally {
+      clearTimeout(timer);
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+
+async function installAndRestartAppUpdate() {
+  if (state.updateCheck.busy) return;
+  const targetVersion = state.updateCheck.data?.latestVersion || '';
+  state.updateCheck = {
+    ...state.updateCheck,
+    busy: true,
+    status: 'installing',
+    error: null,
+  };
+  renderAboutPane();
+
+  try {
+    const res = await api('/api/update/install', {
+      method: 'POST',
+      body: JSON.stringify({ targetVersion }),
+    });
+    state.updateCheck = {
+      ...state.updateCheck,
+      busy: true,
+      status: 'restarting',
+      error: null,
+    };
+    renderAboutPane();
+    showToast(t('aboutUpdateRestarting'), 'info');
+
+    if (res.restarted) {
+      const backOnline = await waitForRestartedServer(res.instanceId);
+      if (!backOnline) {
+        state.updateCheck = {
+          ...state.updateCheck,
+          busy: false,
+          status: 'error',
+          action: 'check',
+          error: t('aboutUpdateRestartTimeout'),
+        };
+        renderAboutPane();
+        showToast(t('aboutUpdateRestartTimeout'), 'info');
+      }
+    } else {
+      window.location.reload();
+    }
+  } catch (err) {
+    const errMsg = err?.message || String(err);
+    state.updateCheck = {
+      ...state.updateCheck,
+      busy: false,
+      status: 'error',
+      action: 'install',
+      error: errMsg,
+    };
+    renderAboutPane();
+    showToast(t('aboutUpdateInstallError', { error: errMsg }), 'error');
+  }
+}
+
+async function checkForAppUpdate() {
+  if (state.updateCheck.busy) return;
+  if (state.updateCheck.action === 'install') {
+    await installAndRestartAppUpdate();
+    return;
+  }
+
+  state.updateCheck = {
+    ...state.updateCheck,
+    busy: true,
+    status: 'checking',
+    action: 'check',
+    error: null,
+  };
+  renderAboutPane();
+
+  try {
+    const res = await api('/api/update/check');
+    if (res.currentVersion) {
+      state.appVersion = res.currentVersion;
+    }
+    const nextStatus = res.hasUpdate ? 'update-available' : 'up-to-date';
+    state.updateCheck = {
+      status: nextStatus,
+      busy: false,
+      action: res.hasUpdate ? 'install' : 'check',
+      data: res,
+      error: null,
+    };
+    renderAboutPane();
+    if (res.hasUpdate) {
+      showToast(t('aboutUpdateAvailable', { version: res.latestVersion }), 'info');
+    } else {
+      showToast(t('aboutUpdateLatest', { version: res.latestVersion || state.appVersion }), 'success');
+    }
+  } catch (err) {
+    const errMsg = err?.message || String(err);
+    state.updateCheck = {
+      status: 'error',
+      busy: false,
+      action: 'check',
+      data: err?.payload || null,
+      error: errMsg,
+    };
+    renderAboutPane();
+    showToast(t('aboutUpdateError', { error: errMsg }), 'error');
   }
 }
 
@@ -3150,9 +3383,7 @@ function bindEvents() {
   $('tab-settings-ai').addEventListener('click', () => setSettingsTab('ai'));
   $('tab-settings-tools').addEventListener('click', () => setSettingsTab('tools'));
   $('tab-settings-about')?.addEventListener('click', () => setSettingsTab('about'));
-  $('btn-check-update')?.addEventListener('click', () => {
-    showToast(t('aboutUpdateComingSoonToast'), 'info');
-  });
+  $('btn-check-update')?.addEventListener('click', checkForAppUpdate);
 
   $('setting-lang-select')?.addEventListener('change', (e) => {
     applyLanguage(e.target.value, true);
@@ -3236,26 +3467,7 @@ function bindEvents() {
       return;
     }
     try {
-      let copied = false;
-      if (navigator.clipboard?.writeText) {
-        try {
-          await navigator.clipboard.writeText(text);
-          copied = true;
-        } catch {
-          copied = false;
-        }
-      }
-      if (!copied) {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        copied = document.execCommand('copy');
-        ta.remove();
-      }
-      if (!copied) throw new Error('copy failed');
+      await copyTextToClipboard(text);
       showToast(t('copiedToClipboard'), 'success');
     } catch {
       showToast(t('copyLogFailToast'), 'error');

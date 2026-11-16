@@ -2156,8 +2156,37 @@ input[type="checkbox"] {
 }
 
 .about-update-status {
+  display: flex;
+  align-items: center;
+  width: 100%;
   font-size: 13px;
   color: var(--text-secondary);
+}
+
+.about-update-status.is-success .about-update-text {
+  color: var(--success-text);
+}
+
+.about-update-status.is-update .about-update-text {
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+.about-update-status.is-error .about-update-text {
+  color: var(--danger-text);
+}
+
+.about-links-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.about-link-btn {
+  padding: 7px 14px;
+  border-radius: 8px;
+  text-decoration: none;
 }
 
 @media (max-width: 680px) {

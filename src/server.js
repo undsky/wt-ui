@@ -51,12 +51,14 @@ import {
   normalizeToolCommand,
   switchAndOpenWorktree,
 } from './tools.js';
+import { checkNpmUpdate, DEFAULT_NPM_PACKAGE_NAME, installNpmUpdate } from './updater.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, '..', 'public');
 const MONACO_DIR = resolve(__dirname, '..', 'node_modules', 'monaco-editor', 'min');
 const PKG = JSON.parse(readFileSync(resolve(__dirname, '..', 'package.json'), 'utf8'));
 const APP_VERSION = PKG.version || '0.1.0';
+const APP_PACKAGE_NAME = PKG.name || DEFAULT_NPM_PACKAGE_NAME;
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -259,7 +261,17 @@ async function cleanupWorktreeTools(projectId, exactKeys = [], pathToMatch = '')
   });
 }
 
-export function createAppServer({ wtBin: explicitWtBin, noAutoInstall = false } = {}) {
+export function createAppServer({
+  wtBin: explicitWtBin,
+  noAutoInstall = false,
+  checkUpdate = checkNpmUpdate,
+  installUpdate = installNpmUpdate,
+  onRestart = null,
+} = {}) {
+  const serverInstanceId = randomUUID();
+  let inflightUpdateCheck = null;
+  let inflightUpdateInstall = null;
+
   const server = createServer(async (req, res) => {
     try {
       let url;
@@ -282,7 +294,7 @@ export function createAppServer({ wtBin: explicitWtBin, noAutoInstall = false } 
 
       if (req.method === 'GET' && pathname === '/api/health') {
         const env = await checkEnvironment({ wtBin: explicitWtBin });
-        sendJson(res, 200, { ...env, autoInstall: !noAutoInstall });
+        sendJson(res, 200, { ...env, autoInstall: !noAutoInstall, instanceId: serverInstanceId });
         return;
       }
 
@@ -301,6 +313,63 @@ export function createAppServer({ wtBin: explicitWtBin, noAutoInstall = false } 
           appVersion: APP_VERSION,
           tools: getAllTools(store.customTools),
           terminals: getSupportedTerminals(),
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/update/check') {
+        if (!inflightUpdateCheck) {
+          inflightUpdateCheck = Promise.resolve()
+            .then(() =>
+              checkUpdate({
+                packageName: APP_PACKAGE_NAME,
+                currentVersion: APP_VERSION,
+              })
+            )
+            .finally(() => {
+              inflightUpdateCheck = null;
+            });
+        }
+        const updateInfo = await inflightUpdateCheck;
+        sendJson(res, updateInfo.ok ? 200 : 502, updateInfo);
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/api/update/install') {
+        const body = await readJsonBody(req).catch(() => ({}));
+        const targetVersion = typeof body.targetVersion === 'string' ? body.targetVersion.trim() : '';
+        if (!inflightUpdateInstall) {
+          inflightUpdateInstall = Promise.resolve()
+            .then(() =>
+              installUpdate({
+                packageName: APP_PACKAGE_NAME,
+                targetVersion,
+              })
+            )
+            .finally(() => {
+              inflightUpdateInstall = null;
+            });
+        }
+        const installResult = await inflightUpdateInstall;
+        const payload = {
+          ...installResult,
+          restarted: Boolean(installResult.ok && onRestart),
+          instanceId: serverInstanceId,
+        };
+        if (!installResult.ok) {
+          sendJson(res, 500, payload);
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        });
+        res.end(JSON.stringify(payload), () => {
+          if (onRestart) {
+            setTimeout(() => {
+              onRestart(installResult);
+            }, 50);
+          }
         });
         return;
       }

@@ -464,12 +464,50 @@
                         <polyline points="7 10 12 15 17 10"></polyline>
                         <line x1="12" y1="15" x2="12" y2="3"></line>
                       </svg>
-                      <span data-i18n="checkUpdateBtn">检查更新</span>
+                      <span id="btn-check-update-label" data-i18n="checkUpdateBtn">检查更新</span>
                     </button>
                   </div>
-                  <div class="settings-row about-status-row">
-                    <span id="about-update-status" class="about-update-status" data-i18n="aboutUpdatePending">检查更新功能将在后续版本中提供</span>
+                  <div id="about-status-row" class="settings-row about-status-row hidden">
+                    <div id="about-update-status" class="about-update-status"></div>
                   </div>
+                </div>
+                <div class="about-links-row">
+                  <a
+                    href="https://github.com/undsky/wt-ui"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="btn btn-secondary btn-sm about-link-btn"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                    </svg>
+                    <span data-i18n="aboutStarBtn">去点 star</span>
+                  </a>
+                  <a
+                    href="https://github.com/undsky/wt-ui/issues"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="btn btn-secondary btn-sm about-link-btn"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <line x1="12" y1="8" x2="12" y2="12"></line>
+                      <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                    </svg>
+                    <span data-i18n="aboutIssuesBtn">提交 issues</span>
+                  </a>
+                  <a
+                    href="https://www.undsky.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="btn btn-secondary btn-sm about-link-btn"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                      <circle cx="12" cy="7" r="4"></circle>
+                    </svg>
+                    <span data-i18n="aboutAuthorBtn">关于作者</span>
+                  </a>
                 </div>
               </div>
             </div>

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -207,11 +208,61 @@ async function main() {
   const hasExplicitPort = Number.isInteger(flags.port) && flags.port > 0;
   const preferredPort = hasExplicitPort ? flags.port : 4173;
 
-  const server = createAppServer({
+  let actualPort = preferredPort;
+  let server = null;
+  const handleRestart = ({ installedEntryPath } = {}) => {
+    const entryScript =
+      installedEntryPath && existsSync(installedEntryPath)
+        ? installedEntryPath
+        : fileURLToPath(import.meta.url);
+    const restartArgs = [
+      entryScript,
+      'start',
+      '--port',
+      String(actualPort),
+      '--host',
+      host,
+      '--no-open',
+    ];
+    if (flags.wtBin) {
+      restartArgs.push('--wt-bin', flags.wtBin);
+    }
+    if (flags.noAutoInstall) {
+      restartArgs.push('--no-auto-install');
+    }
+
+    let launched = false;
+    const launchReplacement = () => {
+      if (launched) return;
+      launched = true;
+      try {
+        const child = spawn(process.execPath, restartArgs, {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+        child.unref();
+      } catch (err) {
+        console.error(`重启失败: ${err.message}`);
+      }
+      process.exit(0);
+    };
+
+    try {
+      server?.closeAllConnections?.();
+      server?.close(() => launchReplacement());
+    } catch {
+      launchReplacement();
+    }
+    setTimeout(launchReplacement, 1000).unref();
+  };
+
+  server = createAppServer({
     wtBin: flags.wtBin,
     noAutoInstall: Boolean(flags.noAutoInstall),
+    onRestart: handleRestart,
   });
-  const actualPort = await listenWithFallback(server, host, preferredPort, !hasExplicitPort);
+  actualPort = await listenWithFallback(server, host, preferredPort, !hasExplicitPort);
   // Wildcard listen addresses are not browsable (especially on Windows).
   const browseHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host;
   const url = `http://${browseHost}:${actualPort}`;

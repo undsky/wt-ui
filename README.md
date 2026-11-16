@@ -1,12 +1,13 @@
 # Git Worktree Visual Platform
 
 <div align="center">
-  <img src="./public/logo.png" alt="wtUI" width="120" />
+  <img src="https://fastly.jsdelivr.net/gh/undsky/doudou-cdn-stg@main/2026/11/16/1794812339725-70e78178-de74-4aeb-a471-1c18aa103d9c.png" alt="wtUI" width="120" />
   <p>Parallel development with multiple AI tools, one-click merge, and AI-powered conflict resolution.</p>
   <p>English | <a href="README.zh-CN.md">简体中文</a></p>
   <p>
     <a href="#quick-start">Quick Start</a> ·
     <a href="#screenshots">Screenshots</a> ·
+    <a href="#cli-commands">CLI Commands</a> ·
     <a href="#key-features">Key Features</a> ·
     <a href="#-community">Community</a> ·
     <a href="#-license">License</a>
@@ -30,6 +31,23 @@ wtui start
 ![Merge Conflict Resolution (Visual & AI-Assisted)](https://fastly.jsdelivr.net/gh/undsky/doudou-cdn-stg@main/2026/11/16/1794806504662-e805bcf4-2d8b-4397-bdaa-c6080980b6fe.jpg)
 
 ![Main Interface (Dark Theme / English)](https://fastly.jsdelivr.net/gh/undsky/doudou-cdn-stg@main/2026/11/16/1794806507456-fee7fb12-8d61-43ba-8dcd-294117ea4eed.png)
+
+## CLI Commands
+
+```text
+Usage:
+  wtui start [path] [options]   Start the visual web platform and open the browser
+  wtui doctor [--wt-bin <path>] Check Worktrunk (wt) and Git environment
+  wtui --help                   Show help information
+  wtui --version                Show version number
+
+Options (start):
+  -p, --port <port>              Specify port (default: 4173)
+  -H, --host <host>              Listen address (default: 127.0.0.1)
+      --wt-bin <path>            Specify Worktrunk wt executable path
+      --no-open                  Do not open browser automatically after startup
+      --no-auto-install          Do not auto-install wt if not detected
+```
 
 ## Key Features
 

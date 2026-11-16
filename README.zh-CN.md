@@ -1,12 +1,13 @@
 # Git Worktree 可视化操作平台
 
 <div align="center">
-  <img src="./public/logo.png" alt="wtUI" width="120" />
+  <img src="https://fastly.jsdelivr.net/gh/undsky/doudou-cdn-stg@main/2026/11/16/1794812339725-70e78178-de74-4aeb-a471-1c18aa103d9c.png" alt="wtUI" width="120" />
   <p>多 AI 工具并行开发，一键合并与 AI 冲突解决。</p>
   <p><a href="README.md">English</a> | 简体中文</p>
   <p>
     <a href="#快速开始">快速开始</a> ·
     <a href="#界面预览">界面预览</a> ·
+    <a href="#命令说明">命令说明</a> ·
     <a href="#核心功能">核心功能</a> ·
     <a href="#-交流与支持">交流与支持</a> ·
     <a href="#-许可证">许可证</a>
@@ -30,6 +31,23 @@ wtui start
 ![解决合并冲突（可视化与 AI 辅助）](https://fastly.jsdelivr.net/gh/undsky/doudou-cdn-stg@main/2026/11/16/1794806504662-e805bcf4-2d8b-4397-bdaa-c6080980b6fe.jpg)
 
 ![主界面（暗色主题 / English）](https://fastly.jsdelivr.net/gh/undsky/doudou-cdn-stg@main/2026/11/16/1794806507456-fee7fb12-8d61-43ba-8dcd-294117ea4eed.png)
+
+## 命令说明
+
+```text
+用法:
+  wtui start [path] [options]   启动 Web 可视化平台并打开浏览器
+  wtui doctor [--wt-bin <path>] 检查 Worktrunk (wt) 与 Git 环境
+  wtui --help                   显示帮助信息
+  wtui --version                显示版本号
+
+选项 (start):
+  -p, --port <port>              指定端口 (默认 4173)
+  -H, --host <host>              监听地址 (默认 127.0.0.1)
+      --wt-bin <path>            指定 Worktrunk wt 可执行文件路径
+      --no-open                  启动后不自动打开浏览器
+      --no-auto-install          未检测到 wt 时不自动安装
+```
 
 ## 核心功能
 
