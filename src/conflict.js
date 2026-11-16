@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { getWorktreeInProgressOp, pushWorktreeBranch, runGit } from './remote.js';
 import { buildWtMergeArgs, runWt } from './wt-resolver.js';
@@ -141,6 +142,14 @@ export function parseConflictHunks(content) {
   };
 }
 
+function pickHunkLines(hunk, choice) {
+  if (choice === 'ours') return hunk.oursLines;
+  if (choice === 'theirs') return hunk.theirsLines;
+  if (choice === 'both') return [...hunk.oursLines, ...hunk.theirsLines];
+  if (choice === 'both_reverse') return [...hunk.theirsLines, ...hunk.oursLines];
+  throw new Error(`未知的冲突解决方式: ${choice}`);
+}
+
 /**
  * Apply a resolution choice to a specific conflict hunk index and return the updated file content.
  * @param {string} content
@@ -160,17 +169,7 @@ export function applyHunkResolution(content, hunkIndex, choice) {
       const h = seg.hunk;
       if (h.id === hunkIndex) {
         targetFound = true;
-        if (choice === 'ours') {
-          outLines.push(...h.oursLines);
-        } else if (choice === 'theirs') {
-          outLines.push(...h.theirsLines);
-        } else if (choice === 'both') {
-          outLines.push(...h.oursLines, ...h.theirsLines);
-        } else if (choice === 'both_reverse') {
-          outLines.push(...h.theirsLines, ...h.oursLines);
-        } else {
-          throw new Error(`未知的冲突解决方式: ${choice}`);
-        }
+        outLines.push(...pickHunkLines(h, choice));
       } else {
         outLines.push(...h.rawText.split(/\r?\n/));
       }
@@ -182,6 +181,25 @@ export function applyHunkResolution(content, hunkIndex, choice) {
   }
 
   return outLines.join(le);
+}
+
+/**
+ * Resolve all conflict hunks in a single pass with the given choice.
+ * @param {string} content
+ * @param {'ours' | 'theirs' | 'both' | 'both_reverse'} choice
+ */
+export function resolveAllConflictHunks(content, choice) {
+  const parsed = parseConflictHunks(content);
+  if (parsed.hunkCount === 0) return String(content ?? '');
+  const outLines = [];
+  for (const seg of parsed.segments) {
+    if (seg.type === 'normal') {
+      outLines.push(...seg.lines);
+    } else if (seg.type === 'conflict') {
+      outLines.push(...pickHunkLines(seg.hunk, choice));
+    }
+  }
+  return outLines.join(parsed.lineEnding);
 }
 
 /**
@@ -200,27 +218,30 @@ export async function getConflictStatus(workDir, trackedFiles = []) {
     .split(/\r?\n/)
     .map((s) => s.trim())
     .filter(Boolean);
+  const unmergedSet = new Set(unmergedFiles);
 
   const allFileNames = Array.from(new Set([...trackedFiles, ...unmergedFiles]));
-  const files = allFileNames.map((relPath) => {
-    const isUnmerged = unmergedFiles.includes(relPath);
-    let hunkCount = 0;
-    try {
-      const { full } = resolveSafeRepoFile(workDir, relPath);
-      if (existsSync(full)) {
-        const raw = readFileSync(full, 'utf8');
-        hunkCount = parseConflictHunks(raw).hunkCount;
+  const files = await Promise.all(
+    allFileNames.map(async (relPath) => {
+      const isUnmerged = unmergedSet.has(relPath);
+      let hunkCount = 0;
+      try {
+        const { full } = resolveSafeRepoFile(workDir, relPath);
+        const raw = await readFile(full, 'utf8');
+        if (raw.includes('<<<<<<<')) {
+          hunkCount = parseConflictHunks(raw).hunkCount;
+        }
+      } catch {
+        // Ignore read errors for binary or deleted files
       }
-    } catch {
-      // Ignore read errors for binary or deleted files
-    }
-    return {
-      path: relPath,
-      resolved: !isUnmerged && hunkCount === 0,
-      unmerged: isUnmerged,
-      hunkCount,
-    };
-  });
+      return {
+        path: relPath,
+        resolved: !isUnmerged && hunkCount === 0,
+        unmerged: isUnmerged,
+        hunkCount,
+      };
+    })
+  );
 
   return {
     workDir: resolve(workDir),
@@ -290,10 +311,7 @@ export async function resolveConflictFile(workDir, options) {
         removed = true;
       } else if (existsSync(full)) {
         // Fallback: if stage #2/#3 does not exist (e.g. already staged once), resolve via hunks in file
-        let text = readFileSync(full, 'utf8');
-        while (parseConflictHunks(text).hunkCount > 0) {
-          text = applyHunkResolution(text, 0, options.strategy);
-        }
+        const text = resolveAllConflictHunks(readFileSync(full, 'utf8'), options.strategy);
         writeFileSync(full, text, 'utf8');
       } else {
         throw new Error(coRes.stderr || `无法检出 ${flag}: ${rel}`);
@@ -546,6 +564,7 @@ function buildUrlWithPath(parsed, nextPathname) {
  */
 export function hasConflictMarkers(text) {
   const src = String(text ?? '');
+  if (!src.includes('<<<<<<<')) return false;
   if (parseConflictHunks(src).hunkCount > 0) return true;
   const hasStart = /^<{7}(?:\s|$)/m.test(src);
   if (!hasStart) return false;

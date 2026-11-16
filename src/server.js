@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { hostname as osHostname } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
@@ -122,20 +123,20 @@ class HttpError extends Error {
   }
 }
 
+const CACHED_HOSTNAME = (() => {
+  try {
+    return osHostname().toLowerCase();
+  } catch {
+    return '';
+  }
+})();
+
 function isAllowedHostname(hostname) {
   const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (!h) return false;
   if (h === 'localhost' || h.endsWith('.localhost')) return true;
   if (isIP(h)) return true; // DNS rebinding needs a domain name, IP literals are safe
-  return h === hostname_().toLowerCase();
-}
-
-function hostname_() {
-  try {
-    return osHostname();
-  } catch {
-    return '';
-  }
+  return Boolean(CACHED_HOSTNAME && h === CACHED_HOSTNAME);
 }
 
 /**
@@ -168,7 +169,7 @@ function checkRequestOrigin(req) {
   return true;
 }
 
-function serveStaticFromRoot(rootDir, reqPath, res, cacheControl = 'no-store') {
+async function serveStaticFromRoot(rootDir, reqPath, req, res, cacheControl = 'no-cache') {
   let decoded;
   try {
     decoded = decodeURIComponent(reqPath);
@@ -179,24 +180,46 @@ function serveStaticFromRoot(rootDir, reqPath, res, cacheControl = 'no-store') {
   const normalized = decoded.replace(/^\/+/, '');
   const target = resolve(rootDir, normalized);
   const inside = target === rootDir || target.startsWith(rootDir + sep);
-  if (!inside || !existsSync(target) || !statSync(target).isFile()) {
+  if (!inside) {
     sendJson(res, 404, { error: 'Not found' });
+    return;
+  }
+  let st;
+  try {
+    st = await stat(target);
+  } catch {
+    sendJson(res, 404, { error: 'Not found' });
+    return;
+  }
+  if (!st.isFile()) {
+    sendJson(res, 404, { error: 'Not found' });
+    return;
+  }
+  const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, { ETag: etag, 'Cache-Control': cacheControl });
+    res.end();
     return;
   }
   const ext = extname(target);
   const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-  res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl });
-  res.end(readFileSync(target));
+  const buf = await readFile(target);
+  res.writeHead(200, {
+    'Content-Type': contentType,
+    'Cache-Control': cacheControl,
+    ETag: etag,
+  });
+  res.end(buf);
 }
 
-function serveStatic(reqPath, res) {
+async function serveStatic(reqPath, req, res) {
   if (reqPath.startsWith('/vendor/monaco/')) {
     const monacoSubPath = reqPath.slice('/vendor/monaco/'.length);
-    serveStaticFromRoot(MONACO_DIR, monacoSubPath, res, 'public, max-age=3600');
+    await serveStaticFromRoot(MONACO_DIR, monacoSubPath, req, res, 'public, max-age=3600');
     return;
   }
   const cleanPath = reqPath === '/' ? '/index.html' : reqPath;
-  serveStaticFromRoot(PUBLIC_DIR, cleanPath, res, 'no-store');
+  await serveStaticFromRoot(PUBLIC_DIR, cleanPath, req, res, 'no-cache');
 }
 
 function requireProject(store, projectId, notFoundMsg = '项目不存在') {
@@ -247,7 +270,7 @@ export function createAppServer({ wtBin: explicitWtBin, noAutoInstall = false } 
       const pathname = url.pathname;
 
       if (!pathname.startsWith('/api/')) {
-        serveStatic(pathname, res);
+        await serveStatic(pathname, req, res);
         return;
       }
 
@@ -367,6 +390,30 @@ export function createAppServer({ wtBin: explicitWtBin, noAutoInstall = false } 
       }
 
       const projectMatch = pathname.match(/^\/api\/projects\/([^/]+)$/);
+      if (projectMatch && req.method === 'PATCH') {
+        const projectId = decodeURIComponent(projectMatch[1]);
+        const body = await readJsonBody(req);
+        const payload = await withStoreLock(() => {
+          const current = loadStore();
+          const project = current.projects.find((p) => p.id === projectId);
+          if (!project) {
+            throw new HttpError(404, '项目不存在');
+          }
+          if (typeof body.name === 'string' && body.name.trim()) {
+            project.name = body.name.trim();
+          }
+          if (typeof body.defaultToolId === 'string' && body.defaultToolId.trim()) {
+            project.defaultToolId = body.defaultToolId.trim();
+          }
+          if (body.worktreeTools && typeof body.worktreeTools === 'object') {
+            project.worktreeTools = { ...(project.worktreeTools || {}), ...body.worktreeTools };
+          }
+          saveStore(current);
+          return { project, store: current };
+        });
+        sendJson(res, 200, payload);
+        return;
+      }
       if (projectMatch && req.method === 'DELETE') {
         const projectId = decodeURIComponent(projectMatch[1]);
         const store = await withStoreLock(() => {

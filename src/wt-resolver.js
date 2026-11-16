@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { getManagedWtBinPath } from './wt-installer.js';
@@ -88,23 +88,28 @@ async function collectWtCandidates(explicitBin) {
 
   const locator = process.platform === 'win32' ? 'where.exe' : 'which';
   const names = ['wt', 'git-wt'];
-  for (const name of names) {
-    const argVariants = process.platform === 'win32' ? [[name]] : [['-a', name], [name]];
-    for (const locatorArgs of argVariants) {
-      try {
-        const { stdout } = await execFileAsync(locator, locatorArgs, {
-          timeout: 3000,
-          windowsHide: true,
-        });
-        for (const line of stdout.split(/\r?\n/)) {
-          const trimmed = line.trim();
-          if (trimmed) add(trimmed);
+  const locatedGroups = await Promise.all(
+    names.map(async (name) => {
+      const argVariants = process.platform === 'win32' ? [[name]] : [['-a', name], [name]];
+      for (const locatorArgs of argVariants) {
+        try {
+          const { stdout } = await execFileAsync(locator, locatorArgs, {
+            timeout: 3000,
+            windowsHide: true,
+          });
+          return stdout
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean);
+        } catch {
+          // Try fallback args or ignore when binary is not on PATH
         }
-        break;
-      } catch {
-        // Try fallback args or ignore when binary is not on PATH
       }
-    }
+      return [];
+    })
+  );
+  for (const group of locatedGroups) {
+    for (const item of group) add(item);
   }
 
   if (process.platform === 'win32') {
@@ -195,19 +200,22 @@ export function getInstallGuide(platform = process.platform) {
   };
 }
 
-const ENV_CACHE_TTL_MS = 10_000;
+const ENV_CACHE_TTL_MS = 60_000;
 const envCache = new Map();
+const APPROVALS_CACHE_TTL_MS = 5_000;
+const approvalsCache = new Map();
 
 /**
  * Drop cached environment results (e.g. after installing Worktrunk).
  */
 export function invalidateEnvironmentCache() {
   envCache.clear();
+  approvalsCache.clear();
 }
 
 /**
  * Resolve Worktrunk binary and check environment health (git version, wt version).
- * Results are cached briefly because every API call needs them and probing spawns
+ * Results are cached because every API call needs them and probing spawns
  * several processes (slow on Windows).
  * @param {{ wtBin?: string, fresh?: boolean }} [options]
  */
@@ -215,50 +223,59 @@ export async function checkEnvironment(options = {}) {
   const key = options.wtBin || '';
   const cached = envCache.get(key);
   if (!options.fresh && cached && Date.now() - cached.at < ENV_CACHE_TTL_MS) {
-    return cached.promise;
+    if (!cached.wtBin || !isAbsolute(cached.wtBin) || existsSync(cached.wtBin)) {
+      return cached.promise;
+    }
+    envCache.delete(key);
   }
   const promise = checkEnvironmentUncached(options);
-  envCache.set(key, { at: Date.now(), promise });
+  const entry = { at: Date.now(), promise, wtBin: null };
+  envCache.set(key, entry);
   promise.then(
     (env) => {
       // Do not keep negative results around: the user may be installing wt right now.
-      if (!env.ok) envCache.delete(key);
+      if (!env.ok) {
+        envCache.delete(key);
+      } else {
+        entry.wtBin = env.wtBin || null;
+      }
     },
     () => envCache.delete(key)
   );
   return promise;
 }
 
-async function checkEnvironmentUncached(options = {}) {
-  const candidates = await collectWtCandidates(options.wtBin);
-  let resolvedWt = null;
-  let wtVersion = null;
-
+async function resolveWtFromCandidates(explicitBin) {
+  const candidates = await collectWtCandidates(explicitBin);
   for (const candidate of candidates) {
     const probe = await probeWtBinary(candidate);
     if (probe.ok) {
-      resolvedWt = candidate;
-      wtVersion = probe.version;
-      break;
+      return { resolvedWt: candidate, wtVersion: probe.version, candidates };
     }
   }
+  return { resolvedWt: null, wtVersion: null, candidates };
+}
 
-  let gitVersionRaw = null;
-  let gitVersionTuple = null;
-  let gitSupported = false;
-  let gitError = null;
-
+async function probeGitVersion() {
   try {
     const { stdout } = await execFileAsync('git', ['--version'], {
       timeout: 3000,
       windowsHide: true,
     });
-    gitVersionRaw = stdout.trim();
-    gitVersionTuple = parseVersionTuple(gitVersionRaw);
-    gitSupported = gitVersionTuple ? compareVersions(gitVersionTuple, MIN_GIT_VERSION) >= 0 : false;
+    const gitVersionRaw = stdout.trim();
+    const gitVersionTuple = parseVersionTuple(gitVersionRaw);
+    const gitSupported = gitVersionTuple ? compareVersions(gitVersionTuple, MIN_GIT_VERSION) >= 0 : false;
+    return { gitVersionRaw, gitSupported, gitError: null };
   } catch (err) {
-    gitError = err.message;
+    return { gitVersionRaw: null, gitSupported: false, gitError: err.message };
   }
+}
+
+async function checkEnvironmentUncached(options = {}) {
+  const [{ resolvedWt, wtVersion, candidates }, { gitVersionRaw, gitSupported, gitError }] = await Promise.all([
+    resolveWtFromCandidates(options.wtBin),
+    probeGitVersion(),
+  ]);
 
   const issues = [];
   if (!resolvedWt) {
@@ -327,25 +344,40 @@ export async function runWt(wtBin, repoPath, args, options = {}) {
  * @param {string} repoPath
  */
 export async function checkProjectApprovals(wtBin, repoPath) {
+  const cacheKey = `${wtBin || ''}::${repoPath || ''}`;
+  const cached = approvalsCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < APPROVALS_CACHE_TTL_MS) {
+    return cached.value;
+  }
+
   const res = await runWt(wtBin, repoPath, ['config', 'approvals', 'list', '--format=json'], {
     timeout: 10_000,
   });
   const json = parseWtJson(res.stdout);
   if (!res.ok || !json || typeof json.state !== 'string') {
-    return {
+    const fallback = {
       supported: false,
       state: 'unknown',
       commands: [],
       unapproved: [],
     };
+    approvalsCache.set(cacheKey, { at: Date.now(), value: fallback });
+    return fallback;
   }
   const commands = Array.isArray(json.commands) ? json.commands : [];
-  return {
+  const unapproved = commands.filter((cmd) => cmd && cmd.approved === false);
+  const result = {
     supported: true,
     state: json.state,
     commands,
-    unapproved: commands.filter((cmd) => cmd && cmd.approved === false),
+    unapproved,
   };
+  if (unapproved.length === 0) {
+    approvalsCache.set(cacheKey, { at: Date.now(), value: result });
+  } else {
+    approvalsCache.delete(cacheKey);
+  }
+  return result;
 }
 
 /**

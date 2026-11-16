@@ -6,6 +6,11 @@
   "bin": {
     "wt-ui": "./bin/wt-ui.js"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "public/"
+  ],
   "scripts": {
     "start": "node bin/wt-ui.js start",
     "doctor": "node bin/wt-ui.js doctor",

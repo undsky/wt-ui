@@ -67,13 +67,18 @@ function showToast(message, type = 'info') {
   setTimeout(() => el.remove(), 4200);
 }
 
+const MAX_LOG_BLOCKS = 200;
+const logBlocks = [];
+
 function appendLog(title, details = '') {
   const logEl = $('command-log');
   const time = new Date().toLocaleTimeString();
   const block = `[${time}] ${title}${details ? `\n${details}` : ''}`;
-  const isInitial = logEl.textContent === MESSAGES.zh.waitingAction || logEl.textContent === MESSAGES.en.waitingAction;
-  const prev = isInitial ? '' : `${logEl.textContent}\n\n`;
-  logEl.textContent = `${prev}${block}`;
+  logBlocks.push(block);
+  if (logBlocks.length > MAX_LOG_BLOCKS) {
+    logBlocks.splice(0, logBlocks.length - MAX_LOG_BLOCKS);
+  }
+  logEl.textContent = logBlocks.join('\n\n');
   logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -657,6 +662,7 @@ function renderWorktrees() {
     return;
   }
 
+  const fragment = document.createDocumentFragment();
   for (const item of items) {
     const tr = document.createElement('tr');
     const branchName = item.branch || item.head?.short_sha || '(detached)';
@@ -799,8 +805,9 @@ function renderWorktrees() {
       removeBtn.addEventListener('click', () => removeWorktreeRow(item.branch || wt.path, item));
     }
 
-    tbody.appendChild(tr);
+    fragment.appendChild(tr);
   }
+  tbody.replaceChildren(fragment);
 }
 
 async function loadHealth(autoOpenGuide = false) {
@@ -846,12 +853,21 @@ async function loadState({ autoOpenAdd = false } = {}) {
   renderAboutPane();
 }
 
+let refreshWorktreesController = null;
+
 async function refreshWorktrees() {
   const active = getActiveProject();
   if (!active || !state.openTabIds.includes(active.id)) return;
+  if (refreshWorktreesController) {
+    refreshWorktreesController.abort();
+  }
+  const controller = new AbortController();
+  refreshWorktreesController = controller;
   const branches = $('toggle-branches').checked ? '1' : '0';
   try {
-    const res = await api(`/api/worktrees?projectId=${encodeURIComponent(active.id)}&branches=${branches}`);
+    const res = await api(`/api/worktrees?projectId=${encodeURIComponent(active.id)}&branches=${branches}`, {
+      signal: controller.signal,
+    });
     if (res.project?.worktreeTools) {
       active.worktreeTools = res.project.worktreeTools;
     }
@@ -861,11 +877,16 @@ async function refreshWorktrees() {
       renderWorktrees();
     }
   } catch (err) {
+    if (err?.name === 'AbortError' || controller.signal.aborted) return;
     if (state.activeProjectId === active.id) {
       state.worktreeData = null;
       renderWorktrees();
     }
     appendLog(t('fetchWorktreesFail'), err.payload?.stderr || err.message);
+  } finally {
+    if (refreshWorktreesController === controller) {
+      refreshWorktreesController = null;
+    }
   }
 }
 
@@ -883,11 +904,13 @@ async function selectProject(projectId) {
   renderSidebar();
   renderMainProject();
   renderWorktrees();
-  await api('/api/active-project', {
-    method: 'POST',
-    body: JSON.stringify({ projectId }),
-  });
-  await refreshWorktrees();
+  await Promise.all([
+    api('/api/active-project', {
+      method: 'POST',
+      body: JSON.stringify({ projectId }),
+    }).catch(() => {}),
+    refreshWorktrees(),
+  ]);
 }
 
 async function closeTab(projectId) {
@@ -1683,7 +1706,17 @@ function registerMonacoConflictFeatures(monaco) {
   });
 }
 
+function ensureMonacoStylesheet() {
+  if (document.getElementById('monaco-editor-css')) return;
+  const link = document.createElement('link');
+  link.id = 'monaco-editor-css';
+  link.rel = 'stylesheet';
+  link.href = '/vendor/monaco/vs/editor/editor.main.css';
+  document.head.appendChild(link);
+}
+
 function loadMonacoEditor() {
+  ensureMonacoStylesheet();
   if (window.monaco?.editor) {
     registerMonacoConflictFeatures(window.monaco);
     return Promise.resolve(window.monaco);
@@ -3217,6 +3250,7 @@ function bindEvents() {
   });
 
   $('btn-clear-log').addEventListener('click', () => {
+    logBlocks.length = 0;
     $('command-log').textContent = t('waitingAction');
   });
 }

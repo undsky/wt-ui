@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { formatCommand, parseWtJson, runWt } from './wt-resolver.js';
@@ -443,9 +443,33 @@ export function findLinuxTerminal(preferredTerminal = '') {
  * `wt switch` has already created/switched the worktree and executed hooks beforehand,
  * so the terminal only launches the tool in `worktreePath` without invoking `wt switch` a second time.
  */
+let lastLaunchCleanupAt = 0;
+
 function launchScriptDir() {
   const dir = join(tmpdir(), 'wt-ui-launch');
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+  const now = Date.now();
+  if (now - lastLaunchCleanupAt > 10 * 60_000) {
+    lastLaunchCleanupAt = now;
+    try {
+      for (const name of readdirSync(dir)) {
+        if (!name.startsWith('launch-')) continue;
+        const full = join(dir, name);
+        try {
+          if (now - statSync(full).mtimeMs > 3600_000) {
+            rmSync(full, { force: true });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
   return dir;
 }
 

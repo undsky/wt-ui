@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, posix as pathPosix, resolve, win32 as pathWin32 } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -63,24 +63,25 @@ export function getStorePath() {
   return join(getStoreDir(), 'store.json');
 }
 
+const preferredTerminalCache = new Map();
+
 export function getDefaultPreferredTerminal(platform = process.platform) {
+  if (preferredTerminalCache.has(platform)) {
+    return preferredTerminalCache.get(platform);
+  }
+  let resolved = 'auto';
   if (platform === 'darwin') {
-    if (
+    resolved =
       existsSync('/Applications/iTerm.app') ||
       existsSync(join(homedir(), 'Applications', 'iTerm.app'))
-    ) {
-      return 'iterm2';
-    }
-    return 'terminal';
-  }
-  if (platform === 'win32') {
+        ? 'iterm2'
+        : 'terminal';
+  } else if (platform === 'win32') {
     const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
-    if (existsSync(join(localAppData, 'Microsoft', 'WindowsApps', 'wt.exe'))) {
-      return 'wt';
-    }
-    return 'cmd';
+    resolved = existsSync(join(localAppData, 'Microsoft', 'WindowsApps', 'wt.exe')) ? 'wt' : 'cmd';
   }
-  return 'auto';
+  preferredTerminalCache.set(platform, resolved);
+  return resolved;
 }
 
 export function getAutoStartFilePath(platform = process.platform) {
@@ -231,15 +232,34 @@ function defaultStore() {
   };
 }
 
+let storeCache = {
+  filePath: '',
+  mtimeMs: -1,
+  size: -1,
+  store: null,
+};
+
 export function loadStore() {
   const filePath = getStorePath();
-  if (!existsSync(filePath)) {
+  let st;
+  try {
+    st = statSync(filePath);
+  } catch {
+    storeCache = { filePath: '', mtimeMs: -1, size: -1, store: null };
     return defaultStore();
+  }
+  if (
+    storeCache.store &&
+    storeCache.filePath === filePath &&
+    storeCache.mtimeMs === st.mtimeMs &&
+    storeCache.size === st.size
+  ) {
+    return structuredClone(storeCache.store);
   }
   try {
     const raw = readFileSync(filePath, 'utf8');
     const parsed = JSON.parse(raw);
-    return {
+    const normalized = {
       workspaces: Array.isArray(parsed.workspaces) ? parsed.workspaces : [],
       projects: Array.isArray(parsed.projects) ? parsed.projects : [],
       customTools: Array.isArray(parsed.customTools) ? parsed.customTools : [],
@@ -260,6 +280,13 @@ export function loadStore() {
       },
       activeProjectId: parsed.activeProjectId ?? null,
     };
+    storeCache = {
+      filePath,
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      store: structuredClone(normalized),
+    };
+    return normalized;
   } catch {
     return defaultStore();
   }
@@ -282,6 +309,17 @@ export function saveStore(store) {
   const tmpPath = `${targetPath}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
   writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf8');
   renameSync(tmpPath, targetPath);
+  try {
+    const st = statSync(targetPath);
+    storeCache = {
+      filePath: targetPath,
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      store: structuredClone(store),
+    };
+  } catch {
+    storeCache = { filePath: '', mtimeMs: -1, size: -1, store: null };
+  }
   return store;
 }
 

@@ -120,32 +120,37 @@ export async function inspectGitRepo(dirPath) {
     return { isGitRepo: false, rootPath: null };
   }
 
+  let rawOut = '';
+  let gitInvoked = false;
   try {
-    const { stdout: bareOut } = await execFileAsync('git', ['-C', dirPath, 'rev-parse', '--is-bare-repository'], {
-      timeout: 3000,
-      windowsHide: true,
-    });
-    if (bareOut.trim() === 'true') {
-      const { stdout: gitDirOut } = await execFileAsync('git', ['-C', dirPath, 'rev-parse', '--absolute-git-dir'], {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', dirPath, 'rev-parse', '--is-bare-repository', '--absolute-git-dir', '--show-toplevel'],
+      {
         timeout: 3000,
         windowsHide: true,
-      });
-      const bareRoot = gitDirOut.trim();
-      if (bareRoot) {
-        return { isGitRepo: true, rootPath: resolve(bareRoot), isBare: true };
       }
-    }
+    );
+    rawOut = stdout || '';
+    gitInvoked = true;
+  } catch (err) {
+    rawOut = String(err?.stdout || '');
+    gitInvoked = Boolean(rawOut || err?.stderr || typeof err?.code === 'number');
+  }
 
-    const { stdout } = await execFileAsync('git', ['-C', dirPath, 'rev-parse', '--show-toplevel'], {
-      timeout: 3000,
-      windowsHide: true,
-    });
-    const rootPath = stdout.trim();
-    if (rootPath) {
-      return { isGitRepo: true, rootPath: resolve(rootPath), isBare: false };
-    }
-  } catch {
-    // Fall back to filesystem markers in case git is unavailable
+  const lines = rawOut
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (lines[0] === 'true' && lines[1]) {
+    return { isGitRepo: true, rootPath: resolve(lines[1]), isBare: true };
+  }
+  if (lines[0] === 'false' && lines[2]) {
+    return { isGitRepo: true, rootPath: resolve(lines[2]), isBare: false };
+  }
+
+  if (!gitInvoked) {
+    // Fall back to filesystem markers in case git binary is unavailable
     if (existsSync(resolve(dirPath, '.git'))) {
       return { isGitRepo: true, rootPath: resolve(dirPath), isBare: false };
     }
@@ -171,19 +176,20 @@ export async function parseCodeWorkspace(workspaceFilePath) {
   const baseDir = dirname(absFile);
   const folders = Array.isArray(parsed.folders) ? parsed.folders : [];
 
-  const resolvedProjects = [];
-  for (const entry of folders) {
-    if (!entry || typeof entry.path !== 'string') continue;
-    const absPath = isAbsolute(entry.path) ? resolve(entry.path) : resolve(baseDir, entry.path);
-    const gitInfo = await inspectGitRepo(absPath);
-    resolvedProjects.push({
-      name: entry.name || basename(absPath),
-      path: absPath,
-      exists: existsSync(absPath),
-      isGitRepo: gitInfo.isGitRepo,
-      gitRoot: gitInfo.rootPath,
-    });
-  }
+  const validEntries = folders.filter((entry) => entry && typeof entry.path === 'string');
+  const resolvedProjects = await Promise.all(
+    validEntries.map(async (entry) => {
+      const absPath = isAbsolute(entry.path) ? resolve(entry.path) : resolve(baseDir, entry.path);
+      const gitInfo = await inspectGitRepo(absPath);
+      return {
+        name: entry.name || basename(absPath),
+        path: absPath,
+        exists: existsSync(absPath),
+        isGitRepo: gitInfo.isGitRepo,
+        gitRoot: gitInfo.rootPath,
+      };
+    })
+  );
 
   return {
     name: basename(absFile).replace(/\.code-workspace$/i, ''),
