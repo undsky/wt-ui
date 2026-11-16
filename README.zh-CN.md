@@ -1,4 +1,4 @@
-# Git Worktree 可视化操作平台
+<h1 align="center">Git Worktree 可视化操作平台</h1>
 
 <div align="center">
   <img src="https://fastly.jsdelivr.net/gh/undsky/doudou-cdn-stg@main/2026/11/16/1794812339725-70e78178-de74-4aeb-a471-1c18aa103d9c.png" alt="wtUI" width="120" />
