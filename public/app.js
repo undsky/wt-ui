@@ -5,7 +5,7 @@ const SIDEBAR_COLLAPSED_KEY = 'wt_ui_sidebar_collapsed';
 
 const state = {
   env: null,
-  appVersion: '0.1.0',
+  appVersion: '',
   updateCheck: { status: 'idle', busy: false, action: 'check', data: null, error: null },
   workspaces: [],
   projects: [],
@@ -813,12 +813,18 @@ function renderWorktrees() {
 
 async function loadHealth(autoOpenGuide = false) {
   state.env = await api('/api/health');
+  if (typeof state.env?.appVersion === 'string' && state.env.appVersion.trim()) {
+    state.appVersion = state.env.appVersion.trim();
+    renderAboutPane();
+  }
   renderEnv(autoOpenGuide);
 }
 
 async function loadState({ autoOpenAdd = false } = {}) {
   const data = await api('/api/state');
-  state.appVersion = data.appVersion || state.appVersion || '0.1.0';
+  if (typeof data.appVersion === 'string' && data.appVersion.trim()) {
+    state.appVersion = data.appVersion.trim();
+  }
   state.workspaces = data.workspaces;
   state.projects = data.projects;
   state.tools = data.tools;
@@ -2801,7 +2807,7 @@ async function copyTextToClipboard(text) {
 function renderAboutPane() {
   const versionEl = $('about-version-text');
   if (versionEl) {
-    versionEl.textContent = t('aboutVersionLabel', { version: state.appVersion || '0.1.0' });
+    versionEl.textContent = state.appVersion ? t('aboutVersionLabel', { version: state.appVersion }) : '';
   }
 
   const checkBtn = $('btn-check-update');
@@ -2849,7 +2855,7 @@ function renderAboutPane() {
 
   if (status === 'up-to-date') {
     statusEl.classList.add('is-success');
-    const ver = data?.latestVersion || data?.currentVersion || state.appVersion || '0.1.0';
+    const ver = data?.latestVersion || data?.currentVersion || state.appVersion || '';
     statusEl.innerHTML = `<span class="about-update-text">${escapeHtml(t('aboutUpdateLatest', { version: ver }))}</span>`;
     return;
   }

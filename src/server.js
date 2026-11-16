@@ -57,7 +57,7 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, '..', 'public');
 const MONACO_DIR = resolve(__dirname, '..', 'node_modules', 'monaco-editor', 'min');
 const PKG = JSON.parse(readFileSync(resolve(__dirname, '..', 'package.json'), 'utf8'));
-const APP_VERSION = PKG.version || '0.1.0';
+const APP_VERSION = typeof PKG.version === 'string' ? PKG.version.trim() : '';
 const APP_PACKAGE_NAME = PKG.name || DEFAULT_NPM_PACKAGE_NAME;
 
 const MIME_TYPES = {
@@ -294,7 +294,12 @@ export function createAppServer({
 
       if (req.method === 'GET' && pathname === '/api/health') {
         const env = await checkEnvironment({ wtBin: explicitWtBin });
-        sendJson(res, 200, { ...env, autoInstall: !noAutoInstall, instanceId: serverInstanceId });
+        sendJson(res, 200, {
+          ...env,
+          appVersion: APP_VERSION,
+          autoInstall: !noAutoInstall,
+          instanceId: serverInstanceId,
+        });
         return;
       }
 
